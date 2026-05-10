@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "sql-agent-tools": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "backend.app.mcp.server"],
+      "env": {
+        "UV_CACHE_DIR": ".uv-cache"
+      }
+    }
+  }
+}

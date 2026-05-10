@@ -1,0 +1,124 @@
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+
+from backend.app.config import get_settings
+from backend.app.models import (
+    AgentQueryRequest,
+    AgentQueryResponse,
+    ConfigTestResponse,
+    HealthResponse,
+    RuntimeConfigResponse,
+    RuntimeConfigUpdate,
+    RuleSearchResponse,
+    SqlExecuteRequest,
+    SqlExecuteResponse,
+    SqlValidationRequest,
+    SqlValidationResponse,
+)
+from backend.app.services.agent import run_agent_query
+from backend.app.services.business_rules import BusinessRuleError, search_rules
+from backend.app.services.llm import is_llm_configured
+from backend.app.services.postgres import DatabaseError, execute_select, schema_overview
+from backend.app.services.runtime_config import (
+    RuntimeConfigError,
+    read_runtime_config,
+    test_database_config,
+    test_llm_config,
+    update_runtime_config,
+)
+from backend.app.services.sql_guard import validate_select_sql
+from backend.app.services.token_usage import get_total_token_usage
+
+
+settings = get_settings()
+api_prefix = settings.api_prefix
+
+app = FastAPI(title=settings.app_name)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    settings = get_settings()
+    return HealthResponse(
+        status="ok",
+        database_configured=bool(settings.database_url),
+        llm_configured=is_llm_configured(),
+        llm_provider=settings.llm_provider,
+        llm_model=settings.llm_model,
+        app_timezone=settings.app_timezone,
+        business_rules_dir=str(settings.business_rules_dir),
+        token_usage=get_total_token_usage(),
+    )
+
+
+@app.get(f"{api_prefix}/config", response_model=RuntimeConfigResponse)
+def api_config_get() -> RuntimeConfigResponse:
+    return RuntimeConfigResponse(**read_runtime_config())
+
+
+@app.put(f"{api_prefix}/config", response_model=RuntimeConfigResponse)
+def api_config_update(request: RuntimeConfigUpdate) -> RuntimeConfigResponse:
+    try:
+        return RuntimeConfigResponse(**update_runtime_config(request))
+    except RuntimeConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(f"{api_prefix}/config/test/database", response_model=ConfigTestResponse)
+def api_config_test_database(request: RuntimeConfigUpdate) -> ConfigTestResponse:
+    try:
+        return ConfigTestResponse(**test_database_config(request))
+    except RuntimeConfigError as exc:
+        return ConfigTestResponse(ok=False, message=str(exc))
+
+
+@app.post(f"{api_prefix}/config/test/llm", response_model=ConfigTestResponse)
+def api_config_test_llm(request: RuntimeConfigUpdate) -> ConfigTestResponse:
+    try:
+        return ConfigTestResponse(**test_llm_config(request))
+    except RuntimeConfigError as exc:
+        return ConfigTestResponse(ok=False, message=str(exc))
+
+
+@app.get(f"{api_prefix}/rules/search", response_model=RuleSearchResponse)
+def api_rule_search(q: str = Query(min_length=1, max_length=500)) -> RuleSearchResponse:
+    try:
+        return RuleSearchResponse(query=q, results=search_rules(q))
+    except BusinessRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get(f"{api_prefix}/schema")
+def api_schema() -> dict:
+    try:
+        return schema_overview()
+    except DatabaseError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post(f"{api_prefix}/sql/validate", response_model=SqlValidationResponse)
+def api_sql_validate(request: SqlValidationRequest) -> SqlValidationResponse:
+    settings = get_settings()
+    validation = validate_select_sql(request.sql, max_rows=request.max_rows or settings.pg_max_rows)
+    return SqlValidationResponse(**validation)
+
+
+@app.post(f"{api_prefix}/sql/execute", response_model=SqlExecuteResponse)
+def api_sql_execute(request: SqlExecuteRequest) -> SqlExecuteResponse:
+    try:
+        result = execute_select(request.sql, max_rows=request.max_rows)
+    except (DatabaseError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SqlExecuteResponse(**result)
+
+
+@app.post(f"{api_prefix}/agent/query", response_model=AgentQueryResponse)
+def api_agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
+    return run_agent_query(request)
