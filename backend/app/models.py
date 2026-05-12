@@ -65,6 +65,27 @@ class SqlExecuteResponse(BaseModel):
     limited_sql: str
 
 
+class TableMetadataResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    table_schema: str = Field(alias="schema")
+    table: str
+    table_type: str | None = None
+    estimated_rows: int | None = None
+    comment: str | None = None
+    columns: list[dict[str, Any]] = Field(default_factory=list)
+    indexes: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+
+
+class SchemaMetadataResponse(BaseModel):
+    tables: list[TableMetadataResponse]
+    table_count: int
+    failed_count: int = 0
+    max_workers: int = 4
+    statement_timeout_ms: int = 5000
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     database_configured: bool

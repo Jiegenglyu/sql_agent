@@ -1,13 +1,16 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Bot,
   CheckCircle2,
   Clock3,
+  Columns3,
   Database,
+  GripVertical,
   KeyRound,
   Languages,
   Loader2,
+  RefreshCw,
   Save,
   Search,
   Send,
@@ -15,10 +18,20 @@ import {
   ShieldCheck,
   Sparkles,
   Table2,
-  TerminalSquare
+  TerminalSquare,
+  X
 } from "lucide-react";
 
-import { getHealth, getRuntimeConfig, queryAgent, testDatabaseConfig, testLlmConfig, updateRuntimeConfig } from "./api";
+import {
+  getHealth,
+  getRuntimeConfig,
+  getSchemaMetadata,
+  previewTable,
+  queryAgent,
+  testDatabaseConfig,
+  testLlmConfig,
+  updateRuntimeConfig
+} from "./api";
 import type {
   AgentResponse,
   ConfigTestResponse,
@@ -26,6 +39,8 @@ import type {
   QueryResult,
   RuntimeConfigResponse,
   RuntimeConfigUpdate,
+  SchemaMetadataResponse,
+  TableMetadata,
   TokenUsage,
   TraceStep,
   UiLanguage
@@ -38,6 +53,8 @@ interface CopyText {
   send: string;
   sending: string;
   settings: string;
+  openSettings: string;
+  closeSettings: string;
   settingsDatabase: string;
   settingsModel: string;
   settingsRuntime: string;
@@ -92,6 +109,23 @@ interface CopyText {
   emptyTrace: string;
   emptyRules: string;
   emptySchema: string;
+  dataExplorer: string;
+  collectMetadata: string;
+  collectingMetadata: string;
+  metadataReady: string;
+  metadataEmpty: string;
+  metadataFailed: string;
+  tableSearch: string;
+  tablePreview: string;
+  previewRows: string;
+  previewLoading: string;
+  columns: string;
+  indexes: string;
+  estimatedRows: string;
+  tableType: string;
+  failedTables: string;
+  noTableSelected: string;
+  metadataSafety: string;
 }
 
 const COPY = {
@@ -102,6 +136,8 @@ const COPY = {
     send: "发送",
     sending: "查询中",
     settings: "设置",
+    openSettings: "打开设置",
+    closeSettings: "关闭设置",
     settingsDatabase: "数据库",
     settingsModel: "大模型",
     settingsRuntime: "运行",
@@ -155,7 +191,24 @@ const COPY = {
     emptySql: "还没有生成 SQL。",
     emptyTrace: "还没有运行轨迹。",
     emptyRules: "暂无命中的规则。",
-    emptySchema: "暂无 schema 信息。"
+    emptySchema: "暂无 schema 信息。",
+    dataExplorer: "数据表预览",
+    collectMetadata: "收集表元数据",
+    collectingMetadata: "收集中",
+    metadataReady: "已收集",
+    metadataEmpty: "点击收集表元数据后选择表格预览。",
+    metadataFailed: "元数据收集失败",
+    tableSearch: "搜索 schema 或表名",
+    tablePreview: "表格预览",
+    previewRows: "预览前 10 行",
+    previewLoading: "读取预览中",
+    columns: "字段",
+    indexes: "索引",
+    estimatedRows: "估算行数",
+    tableType: "类型",
+    failedTables: "失败表",
+    noTableSelected: "请选择一张表。",
+    metadataSafety: "4 并发 / 5 秒超时 / 估算行数"
   },
   en: {
     title: "Business Data Agent",
@@ -164,6 +217,8 @@ const COPY = {
     send: "Send",
     sending: "Querying",
     settings: "Settings",
+    openSettings: "Open Settings",
+    closeSettings: "Close Settings",
     settingsDatabase: "Database",
     settingsModel: "Model",
     settingsRuntime: "Runtime",
@@ -222,7 +277,24 @@ const COPY = {
     emptySql: "No SQL generated yet.",
     emptyTrace: "No trace yet.",
     emptyRules: "No matching rules yet.",
-    emptySchema: "No schema loaded yet."
+    emptySchema: "No schema loaded yet.",
+    dataExplorer: "Table Preview",
+    collectMetadata: "Collect Metadata",
+    collectingMetadata: "Collecting",
+    metadataReady: "Collected",
+    metadataEmpty: "Collect table metadata, then select a table to preview.",
+    metadataFailed: "Metadata collection failed",
+    tableSearch: "Search schema or table",
+    tablePreview: "Table Preview",
+    previewRows: "Preview first 10 rows",
+    previewLoading: "Loading preview",
+    columns: "Columns",
+    indexes: "Indexes",
+    estimatedRows: "Estimated rows",
+    tableType: "Type",
+    failedTables: "Failed tables",
+    noTableSelected: "Select a table.",
+    metadataSafety: "4 workers / 5s timeout / estimated rows"
   }
 } satisfies Record<UiLanguage, CopyText>;
 
@@ -261,6 +333,8 @@ const EMPTY_USAGE: TokenUsage = {
   requests: 0
 };
 
+const PANE_MIN_SIZES: [number, number] = [34, 34];
+
 function App() {
   const [language, setLanguage] = useState<UiLanguage>("zh");
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -272,10 +346,21 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saved">("idle");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"database" | "model" | "runtime">("database");
   const [testingConfig, setTestingConfig] = useState<ConfigTestTarget | null>(null);
   const [configTestResult, setConfigTestResult] = useState<Partial<Record<ConfigTestTarget, ConfigTestResponse>>>({});
+  const [paneSizes, setPaneSizes] = useState<[number, number]>([48, 52]);
+  const [metadata, setMetadata] = useState<SchemaMetadataResponse | null>(null);
+  const [metadataLoading, setMetadataLoading] = useState(false);
+  const [metadataError, setMetadataError] = useState<string | null>(null);
+  const [tableFilter, setTableFilter] = useState("");
+  const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<QueryResult | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLElement>(null);
   const text = COPY[language];
 
   useEffect(() => {
@@ -286,11 +371,78 @@ function App() {
     messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
 
+  useEffect(() => {
+    if (!settingsOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        setSettingsOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [settingsOpen]);
+
+  const selectedTable = useMemo(() => {
+    if (!metadata || !selectedTableId) {
+      return null;
+    }
+    return metadata.tables.find((item) => tableKey(item) === selectedTableId) ?? null;
+  }, [metadata, selectedTableId]);
+
+  useEffect(() => {
+    if (!selectedTable) {
+      setPreview(null);
+      setPreviewError(null);
+      setPreviewLoading(false);
+      return;
+    }
+    if (selectedTable.error) {
+      setPreview(null);
+      setPreviewError(selectedTable.error);
+      setPreviewLoading(false);
+      return;
+    }
+
+    let ignore = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    previewTable(selectedTable.schema, selectedTable.table, 10)
+      .then((result) => {
+        if (!ignore) {
+          setPreview(result);
+        }
+      })
+      .catch((err: Error) => {
+        if (!ignore) {
+          setPreview(null);
+          setPreviewError(formatError(err.message));
+        }
+      })
+      .finally(() => {
+        if (!ignore) {
+          setPreviewLoading(false);
+        }
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [selectedTable?.schema, selectedTable?.table, selectedTable?.error]);
+
   async function refreshStatus() {
     const [nextHealth, nextConfig] = await Promise.all([getHealth(), getRuntimeConfig()]);
     setHealth(nextHealth);
     setRuntimeConfig(nextConfig);
     setConfigForm(configToForm(nextConfig));
+  }
+
+  function handleConfigFormChange(nextForm: ConfigForm) {
+    setConfigForm(nextForm);
+    setSaveState("idle");
   }
 
   async function handleQuery() {
@@ -363,6 +515,58 @@ function App() {
     }
   }
 
+  async function handleCollectMetadata() {
+    setMetadataLoading(true);
+    setMetadataError(null);
+    setPreviewError(null);
+    try {
+      const schemaLimit = optionalNumber(configForm.pg_schema_limit);
+      const result = await getSchemaMetadata(schemaLimit);
+      setMetadata(result);
+      setSelectedTableId((current) => {
+        if (current && result.tables.some((item) => tableKey(item) === current)) {
+          return current;
+        }
+        const firstHealthyTable = result.tables.find((item) => !item.error) ?? result.tables[0] ?? null;
+        return firstHealthyTable ? tableKey(firstHealthyTable) : null;
+      });
+    } catch (err) {
+      const message = err instanceof Error ? formatError(err.message) : String(err);
+      setMetadataError(message);
+      setError(message);
+    } finally {
+      setMetadataLoading(false);
+    }
+  }
+
+  function startPaneResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const workspace = workspaceRef.current;
+    if (!workspace) {
+      return;
+    }
+    const { width } = workspace.getBoundingClientRect();
+    if (width <= 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const startX = event.clientX;
+    const startSizes = paneSizes;
+
+    function onPointerMove(moveEvent: PointerEvent) {
+      const deltaPercent = ((moveEvent.clientX - startX) / width) * 100;
+      setPaneSizes(resizePanePair(startSizes, deltaPercent));
+    }
+
+    function onPointerUp() {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    }
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  }
+
   function handleComposerSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void handleQuery();
@@ -379,15 +583,6 @@ function App() {
     setDraft(example);
   }
 
-  const lastAgent = useMemo(() => {
-    const agents = messages.map((message) => message.agent).filter(Boolean) as AgentResponse[];
-    return agents[agents.length - 1] ?? null;
-  }, [messages]);
-
-  const sessionUsage = useMemo(() => {
-    return messages.reduce<TokenUsage>((usage, message) => addUsage(usage, message.agent?.token_usage), { ...EMPTY_USAGE });
-  }, [messages]);
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -401,6 +596,7 @@ function App() {
           </div>
         </div>
         <div className="top-actions">
+          <SettingsBar onOpen={() => setSettingsOpen(true)} text={text} />
           <LanguageToggle language={language} onChange={setLanguage} />
           <StatusPill ok={Boolean(health?.database_configured)} label={health?.database_configured ? text.dbReady : text.dbMissing} icon="db" />
           <StatusPill ok={Boolean(health?.llm_configured)} label={health?.llm_configured ? text.llmReady : text.llmMissing} icon="spark" />
@@ -414,57 +610,85 @@ function App() {
         </div>
       )}
 
-      <section className="workspace-grid">
-        <section className="panel chat-panel">
-          <div className="chat-messages" ref={messagesRef}>
-            {messages.length === 0 && (
-              <div className="empty-chat">
-                <p>{text.emptyChat}</p>
-                <div className="example-row inline">
-                  {text.examples.map((example) => (
-                    <button className="chip-button" key={example} onClick={() => applyExample(example)}>
-                      {example}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            {messages.map((message) => (
-              <ChatMessageView key={message.id} message={message} text={text} />
-            ))}
-            {busy && (
-              <div className="message assistant">
-                <div className="message-avatar">
-                  <Loader2 className="spin" size={16} />
-                </div>
-                <div className="message-body">
-                  <div className="message-meta">Agent</div>
-                  <div className="message-bubble">{text.sending}</div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <form className="chat-composer" onSubmit={handleComposerSubmit}>
-            <textarea
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              placeholder={text.placeholder}
-              rows={2}
-            />
-            <button className="primary-button send-button" type="submit" disabled={busy || draft.trim().length === 0}>
-              {busy ? <Loader2 className="spin" size={17} /> : <Send size={17} />}
-              <span>{busy ? text.sending : text.send}</span>
-            </button>
-          </form>
+      <section
+        className="workspace-grid resizable-workspace"
+        ref={workspaceRef}
+        style={{ gridTemplateColumns: `${paneSizes[0]}% 8px ${paneSizes[1]}%` }}
+      >
+        <section className="workspace-pane data-pane">
+          <DataExplorerPanel
+            metadata={metadata}
+            selectedTable={selectedTable}
+            selectedTableId={selectedTableId}
+            tableFilter={tableFilter}
+            preview={preview}
+            loading={metadataLoading}
+            previewLoading={previewLoading}
+            metadataError={metadataError}
+            previewError={previewError}
+            onCollect={handleCollectMetadata}
+            onFilterChange={setTableFilter}
+            onSelectTable={setSelectedTableId}
+            text={text}
+          />
         </section>
 
-        <aside className="side-column">
+        <ResizeHandle onPointerDown={startPaneResize} />
+
+        <section className="workspace-pane agent-pane">
+          <section className="panel chat-panel">
+            <div className="chat-messages" ref={messagesRef}>
+              {messages.length === 0 && (
+                <div className="empty-chat">
+                  <p>{text.emptyChat}</p>
+                  <div className="example-row inline">
+                    {text.examples.map((example) => (
+                      <button className="chip-button" key={example} onClick={() => applyExample(example)}>
+                        {example}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {messages.map((message) => (
+                <ChatMessageView key={message.id} message={message} text={text} />
+              ))}
+              {busy && (
+                <div className="message assistant">
+                  <div className="message-avatar">
+                    <Loader2 className="spin" size={16} />
+                  </div>
+                  <div className="message-body">
+                    <div className="message-meta">Agent</div>
+                    <div className="message-bubble">{text.sending}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <form className="chat-composer" onSubmit={handleComposerSubmit}>
+              <textarea
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                placeholder={text.placeholder}
+                rows={2}
+              />
+              <button className="primary-button send-button" type="submit" disabled={busy || draft.trim().length === 0}>
+                {busy ? <Loader2 className="spin" size={17} /> : <Send size={17} />}
+                <span>{busy ? text.sending : text.send}</span>
+              </button>
+            </form>
+          </section>
+        </section>
+      </section>
+
+      {settingsOpen && (
+        <SettingsModal text={text} onClose={() => setSettingsOpen(false)}>
           <SettingsPanel
             form={configForm}
             runtimeConfig={runtimeConfig}
-            onChange={setConfigForm}
+            onChange={handleConfigFormChange}
             onSubmit={handleConfigSave}
             saving={savingConfig}
             saveState={saveState}
@@ -475,19 +699,8 @@ function App() {
             testResult={configTestResult}
             text={text}
           />
-          <TokenPanel
-            current={lastAgent?.token_usage ?? EMPTY_USAGE}
-            session={sessionUsage}
-            server={health?.token_usage ?? EMPTY_USAGE}
-            text={text}
-          />
-          <RunContext health={health} text={text} />
-          <TracePanel trace={lastAgent?.trace ?? []} text={text} />
-          <SqlPanel sql={lastAgent?.sql ?? ""} text={text} />
-          <RulesPanel agent={lastAgent} text={text} />
-          <SchemaPanel agent={lastAgent} text={text} />
-        </aside>
-      </section>
+        </SettingsModal>
+      )}
     </main>
   );
 }
@@ -516,12 +729,41 @@ function ChatMessageView({ message, text }: { message: ChatMessage; text: CopyTe
 }
 
 function AgentArtifacts({ agent, text }: { agent: AgentResponse; text: CopyText }) {
+  const rawSchemaTables = agent.schema?.tables;
+  const schemaTables = Array.isArray(rawSchemaTables) ? rawSchemaTables.slice(0, 8) : [];
   return (
     <div className="agent-artifacts">
-      {agent.result && <InlineResultTable result={agent.result} text={text} />}
-      <details>
+      <details className="agent-detail">
         <summary>{text.answerDetails}</summary>
+        {agent.result && <InlineResultTable result={agent.result} text={text} />}
         {agent.sql ? <pre className="sql-preview inline">{agent.sql}</pre> : <p className="empty-state slim">{text.emptySql}</p>}
+        <div className="agent-detail-grid">
+          <div>
+            <strong>{text.agentTrace}</strong>
+            {agent.trace.length === 0 && <p className="empty-state slim">{text.emptyTrace}</p>}
+            {agent.trace.slice(0, 6).map((step, index) => (
+              <p className="compact-line" key={`${step.name}-${index}`}>
+                {step.name}: {step.summary}
+              </p>
+            ))}
+          </div>
+          <div>
+            <strong>{text.businessRules}</strong>
+            {agent.rules.length === 0 && <p className="empty-state slim">{text.emptyRules}</p>}
+            {agent.rules.slice(0, 4).map((rule) => (
+              <p className="compact-line" key={rule.path}>{rule.path}</p>
+            ))}
+          </div>
+          <div>
+            <strong>{text.schema}</strong>
+            {schemaTables.length === 0 && <p className="empty-state slim">{text.emptySchema}</p>}
+            {schemaTables.map((item, index) => (
+              <p className="compact-line" key={`${String(item.schema)}-${String(item.table)}-${index}`}>
+                {String(item.schema)}.{String(item.table)}
+              </p>
+            ))}
+          </div>
+        </div>
       </details>
     </div>
   );
@@ -692,6 +934,44 @@ function renderInlineMarkdown(text: string) {
   return nodes;
 }
 
+function SettingsBar({
+  onOpen,
+  text
+}: {
+  onOpen: () => void;
+  text: CopyText;
+}) {
+  return (
+    <button className="settings-bar" type="button" onClick={onOpen} aria-label={text.openSettings}>
+      <Settings size={17} />
+      <span>{text.settings}</span>
+    </button>
+  );
+}
+
+function SettingsModal({ children, onClose, text }: { children: JSX.Element; onClose: () => void; text: CopyText }) {
+  return (
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={text.settings}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div className="settings-dialog">
+        <button className="icon-button modal-close" type="button" aria-label={text.closeSettings} onClick={onClose}>
+          <X size={18} />
+        </button>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function LanguageToggle({ language, onChange }: { language: UiLanguage; onChange: (language: UiLanguage) => void }) {
   return (
     <div className="language-toggle" aria-label="Language">
@@ -712,6 +992,194 @@ function StatusPill({ ok, label, icon }: { ok: boolean; label: string; icon: "db
       {icon === "db" ? <Database size={15} /> : <Sparkles size={15} />}
       <span>{label}</span>
     </div>
+  );
+}
+
+function ResizeHandle({ onPointerDown }: { onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void }) {
+  return (
+    <div className="pane-resizer" onPointerDown={onPointerDown} role="separator" aria-orientation="vertical">
+      <GripVertical size={16} />
+    </div>
+  );
+}
+
+function DataExplorerPanel({
+  metadata,
+  selectedTable,
+  selectedTableId,
+  tableFilter,
+  preview,
+  loading,
+  previewLoading,
+  metadataError,
+  previewError,
+  onCollect,
+  onFilterChange,
+  onSelectTable,
+  text
+}: {
+  metadata: SchemaMetadataResponse | null;
+  selectedTable: TableMetadata | null;
+  selectedTableId: string | null;
+  tableFilter: string;
+  preview: QueryResult | null;
+  loading: boolean;
+  previewLoading: boolean;
+  metadataError: string | null;
+  previewError: string | null;
+  onCollect: () => void;
+  onFilterChange: (value: string) => void;
+  onSelectTable: (tableId: string) => void;
+  text: CopyText;
+}) {
+  const filteredTables = useMemo(() => {
+    const tables = metadata?.tables ?? [];
+    const keyword = tableFilter.trim().toLowerCase();
+    if (!keyword) {
+      return tables;
+    }
+    return tables.filter((item) => `${item.schema}.${item.table}`.toLowerCase().includes(keyword));
+  }, [metadata, tableFilter]);
+
+  const columns = selectedTable?.columns ?? [];
+  const indexes = selectedTable?.indexes ?? [];
+
+  return (
+    <section className="panel data-panel">
+      <div className="panel-header">
+        <div>
+          <h2>{text.dataExplorer}</h2>
+          <span>
+            {metadata
+              ? `${text.metadataReady}: ${metadata.table_count} / ${text.failedTables}: ${metadata.failed_count} / ${metadata.statement_timeout_ms}ms`
+              : text.metadataSafety}
+          </span>
+        </div>
+        <button className="secondary-button header-button" type="button" disabled={loading} onClick={onCollect}>
+          {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+          <span>{loading ? text.collectingMetadata : text.collectMetadata}</span>
+        </button>
+      </div>
+
+      <div className="data-toolbar">
+        <label className="table-search">
+          <Search size={15} />
+          <input value={tableFilter} placeholder={text.tableSearch} onChange={(event) => onFilterChange(event.target.value)} />
+        </label>
+      </div>
+
+      {metadataError && (
+        <div className="inline-alert">
+          <AlertTriangle size={16} />
+          <span>{text.metadataFailed}: {metadataError}</span>
+        </div>
+      )}
+
+      {!metadata && !loading && !metadataError && <p className="empty-state">{text.metadataEmpty}</p>}
+
+      {metadata && (
+        <div className="data-explorer-body">
+          <div className="table-list" aria-label={text.schema}>
+            {filteredTables.map((item) => {
+              const key = tableKey(item);
+              return (
+                <button
+                  className={`table-list-item ${selectedTableId === key ? "active" : ""} ${item.error ? "error" : ""}`}
+                  key={key}
+                  type="button"
+                  onClick={() => onSelectTable(key)}
+                >
+                  <strong>{item.table}</strong>
+                  <span>{item.schema}</span>
+                  <small>
+                    {text.estimatedRows}: {formatOptionalNumber(item.estimated_rows)}
+                  </small>
+                </button>
+              );
+            })}
+            {filteredTables.length === 0 && <p className="empty-state slim">{text.emptySchema}</p>}
+          </div>
+
+          <div className="table-detail">
+            {!selectedTable && <p className="empty-state">{text.noTableSelected}</p>}
+            {selectedTable && (
+              <>
+                <div className="table-detail-header">
+                  <div>
+                    <h3>
+                      {selectedTable.schema}.{selectedTable.table}
+                    </h3>
+                    <span>
+                      {text.tableType}: {selectedTable.table_type ?? "-"} / {text.estimatedRows}:{" "}
+                      {formatOptionalNumber(selectedTable.estimated_rows)}
+                    </span>
+                  </div>
+                  {selectedTable.error ? <AlertTriangle size={18} /> : <Table2 size={18} />}
+                </div>
+
+                {selectedTable.error && (
+                  <div className="inline-alert">
+                    <AlertTriangle size={16} />
+                    <span>{selectedTable.error}</span>
+                  </div>
+                )}
+
+                <section className="metadata-section">
+                  <div className="metadata-title">
+                    <Columns3 size={15} />
+                    <strong>
+                      {text.columns} ({columns.length})
+                    </strong>
+                  </div>
+                  <div className="column-list">
+                    {columns.map((column, index) => (
+                      <div className="column-item" key={`${metadataValue(column, "column_name")}-${index}`}>
+                        <strong>{metadataValue(column, "column_name")}</strong>
+                        <span>{metadataValue(column, "data_type")}</span>
+                        <small>{metadataValue(column, "is_nullable") === "YES" ? "nullable" : "not null"}</small>
+                      </div>
+                    ))}
+                    {columns.length === 0 && <p className="empty-state slim">{text.emptySchema}</p>}
+                  </div>
+                </section>
+
+                <section className="metadata-section">
+                  <div className="metadata-title">
+                    <Table2 size={15} />
+                    <strong>{text.previewRows}</strong>
+                  </div>
+                  {previewLoading && (
+                    <div className="loading-row">
+                      <Loader2 className="spin" size={16} />
+                      <span>{text.previewLoading}</span>
+                    </div>
+                  )}
+                  {previewError && !previewLoading && (
+                    <div className="inline-alert">
+                      <AlertTriangle size={16} />
+                      <span>{previewError}</span>
+                    </div>
+                  )}
+                  {preview && !previewLoading && <PreviewResultTable result={preview} text={text} />}
+                </section>
+
+                <details className="metadata-details">
+                  <summary>
+                    {text.indexes} ({indexes.length})
+                  </summary>
+                  <div className="index-list">
+                    {indexes.map((index, itemIndex) => (
+                      <pre key={`${metadataValue(index, "indexname")}-${itemIndex}`}>{metadataValue(index, "indexdef")}</pre>
+                    ))}
+                    {indexes.length === 0 && <p className="empty-state slim">{text.noRows}</p>}
+                  </div>
+                </details>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -751,7 +1219,6 @@ function SettingsPanel({
       <div className="panel-header compact">
         <div>
           <h2>{text.settings}</h2>
-          <span>{runtimeConfig?.database.database_url_preview || runtimeConfig?.llm.model || ""}</span>
         </div>
         <Settings size={16} />
       </div>
@@ -1089,6 +1556,40 @@ function SchemaPanel({ agent, text }: { agent: AgentResponse | null; text: CopyT
   );
 }
 
+function PreviewResultTable({ result, text }: { result: QueryResult; text: CopyText }) {
+  return (
+    <div className="preview-result">
+      <div className="inline-result-title">
+        <Table2 size={15} />
+        <strong>{text.tablePreview}</strong>
+        <span>
+          {result.row_count} {text.rows}
+        </span>
+      </div>
+      <div className="table-wrap preview-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {result.columns.map((column) => (
+                <th key={column}>{column}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {result.rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {result.columns.map((column) => (
+                  <td key={column}>{formatCell(row[column])}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function InlineResultTable({ result, text }: { result: QueryResult; text: CopyText }) {
   return (
     <div className="inline-result">
@@ -1249,6 +1750,38 @@ function formToPayload(form: ConfigForm): RuntimeConfigUpdate {
     payload.db_password = form.db_password.trim();
   }
   return payload;
+}
+
+function tableKey(item: Pick<TableMetadata, "schema" | "table">) {
+  return JSON.stringify([item.schema, item.table]);
+}
+
+function metadataValue(item: Record<string, unknown>, key: string) {
+  const value = item[key];
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  return String(value);
+}
+
+function formatOptionalNumber(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  return formatNumber(value);
+}
+
+function resizePanePair(
+  startSizes: [number, number],
+  deltaPercent: number
+): [number, number] {
+  const next: [number, number] = [...startSizes];
+  const minDelta = PANE_MIN_SIZES[0] - next[0];
+  const maxDelta = next[1] - PANE_MIN_SIZES[1];
+  const appliedDelta = Math.min(Math.max(deltaPercent, minDelta), maxDelta);
+  next[0] += appliedDelta;
+  next[1] -= appliedDelta;
+  return next;
 }
 
 function optionalNumber(value: string): number | undefined {

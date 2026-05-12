@@ -30,6 +30,25 @@ export interface QueryResult {
   limited_sql: string;
 }
 
+export interface TableMetadata {
+  schema: string;
+  table: string;
+  table_type: string | null;
+  estimated_rows: number | null;
+  comment: string | null;
+  columns: Array<Record<string, unknown>>;
+  indexes: Array<Record<string, unknown>>;
+  error: string | null;
+}
+
+export interface SchemaMetadataResponse {
+  tables: TableMetadata[];
+  table_count: number;
+  failed_count: number;
+  max_workers: number;
+  statement_timeout_ms: number;
+}
+
 export interface AgentResponse {
   question: string;
   answer: string;

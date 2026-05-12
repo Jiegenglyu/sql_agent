@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from backend.app.config import get_settings
 from backend.app.models import (
@@ -10,6 +11,7 @@ from backend.app.models import (
     RuntimeConfigResponse,
     RuntimeConfigUpdate,
     RuleSearchResponse,
+    SchemaMetadataResponse,
     SqlExecuteRequest,
     SqlExecuteResponse,
     SqlValidationRequest,
@@ -18,7 +20,7 @@ from backend.app.models import (
 from backend.app.services.agent import run_agent_query
 from backend.app.services.business_rules import BusinessRuleError, search_rules
 from backend.app.services.llm import is_llm_configured
-from backend.app.services.postgres import DatabaseError, execute_select, schema_overview
+from backend.app.services.postgres import DatabaseError, collect_schema_metadata, execute_select, preview_table, schema_overview
 from backend.app.services.runtime_config import (
     RuntimeConfigError,
     read_runtime_config,
@@ -101,6 +103,28 @@ def api_schema() -> dict:
         return schema_overview()
     except DatabaseError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get(f"{api_prefix}/schema/metadata", response_model=SchemaMetadataResponse)
+async def api_schema_metadata(limit: int | None = Query(default=None, ge=1, le=500)) -> SchemaMetadataResponse:
+    try:
+        metadata = await run_in_threadpool(collect_schema_metadata, limit=limit)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return SchemaMetadataResponse(**metadata)
+
+
+@app.get(f"{api_prefix}/schema/table-preview", response_model=SqlExecuteResponse)
+async def api_table_preview(
+    schema: str = Query(min_length=1, max_length=300),
+    table: str = Query(min_length=1, max_length=300),
+    limit: int = Query(default=10, ge=1, le=100),
+) -> SqlExecuteResponse:
+    try:
+        result = await run_in_threadpool(preview_table, schema, table, max_rows=limit)
+    except (DatabaseError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SqlExecuteResponse(**result)
 
 
 @app.post(f"{api_prefix}/sql/validate", response_model=SqlValidationResponse)

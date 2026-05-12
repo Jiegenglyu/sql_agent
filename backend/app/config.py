@@ -1,8 +1,9 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -18,7 +19,7 @@ class Settings(BaseSettings):
     app_name: str = Field(default="sql-agent", alias="APP_NAME")
     api_prefix: str = Field(default="/api", alias="APP_API_PREFIX")
     app_timezone: str = Field(default="Asia/Shanghai", alias="APP_TIMEZONE")
-    cors_origins: list[str] = Field(
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
         alias="CORS_ORIGINS",
     )

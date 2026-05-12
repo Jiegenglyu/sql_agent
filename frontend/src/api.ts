@@ -5,6 +5,7 @@ import type {
   QueryResult,
   RuntimeConfigResponse,
   RuntimeConfigUpdate,
+  SchemaMetadataResponse,
   SqlValidation,
   UiLanguage
 } from "./types";
@@ -73,6 +74,24 @@ export function queryAgent(question: string, language: UiLanguage): Promise<Agen
     method: "POST",
     body: JSON.stringify({ question, execute: true, language })
   });
+}
+
+export function getSchemaMetadata(limit?: number): Promise<SchemaMetadataResponse> {
+  const params = new URLSearchParams();
+  if (limit !== undefined) {
+    params.set("limit", String(limit));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return request<SchemaMetadataResponse>(apiPath(`/schema/metadata${suffix}`));
+}
+
+export function previewTable(schema: string, table: string, limit = 10): Promise<QueryResult> {
+  const params = new URLSearchParams({
+    schema,
+    table,
+    limit: String(limit)
+  });
+  return request<QueryResult>(apiPath(`/schema/table-preview?${params.toString()}`));
 }
 
 export function validateSql(sql: string): Promise<SqlValidation> {
