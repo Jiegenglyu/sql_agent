@@ -51,7 +51,7 @@ def pg_list_schemas() -> list[str]:
 
 @mcp.tool()
 def pg_list_tables(schema: str | None = None, limit: int = 80) -> list[dict[str, Any]]:
-    """List PostgreSQL tables visible to the configured read-only role."""
+    """List PostgreSQL tables visible to the configured read-only role and schema scope."""
     return list_tables(schema=schema, limit=limit)
 
 
@@ -63,7 +63,7 @@ def pg_describe_table(schema: str, table: str) -> dict[str, Any]:
 
 @mcp.tool()
 def pg_schema_overview(limit: int = 80) -> dict[str, Any]:
-    """Return a compact schema overview for SQL generation."""
+    """Return a compact schema overview for SQL generation within the configured schema scope."""
     return schema_overview(limit=limit)
 
 

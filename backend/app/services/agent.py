@@ -58,7 +58,7 @@ AGENT_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "pg_schema_overview",
-            "description": "Return a compact overview of PostgreSQL tables and columns available to the readonly role.",
+            "description": "Return a compact overview of PostgreSQL tables and columns in the configured schema scope.",
             "parameters": {
                 "type": "object",
                 "properties": {

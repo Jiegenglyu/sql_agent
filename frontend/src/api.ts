@@ -76,10 +76,17 @@ export function queryAgent(question: string, language: UiLanguage): Promise<Agen
   });
 }
 
-export function getSchemaMetadata(limit?: number): Promise<SchemaMetadataResponse> {
+export function getSchemaMetadata(limit?: number, schemas?: string[]): Promise<SchemaMetadataResponse> {
   const params = new URLSearchParams();
   if (limit !== undefined) {
     params.set("limit", String(limit));
+  }
+  if (schemas !== undefined) {
+    if (schemas.length === 0) {
+      params.append("schema", "");
+    } else {
+      schemas.forEach((schema) => params.append("schema", schema));
+    }
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return request<SchemaMetadataResponse>(apiPath(`/schema/metadata${suffix}`));

@@ -158,10 +158,10 @@ Do not commit `.env`. It is ignored by Git; the repository only commits `.env.ex
 | --- | --- |
 | App and CORS | `APP_NAME`, `APP_API_PREFIX`, `APP_TIMEZONE`, `CORS_ORIGINS`, `BACKEND_PORT`, `FRONTEND_PORT`, `VITE_API_BASE_URL`, `VITE_API_PREFIX` |
 | Demo PostgreSQL container | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST_PORT`, `POSTGRES_READONLY_USER`, `POSTGRES_READONLY_PASSWORD` |
-| Backend database connection | `DATABASE_URL`, `PG_MAX_ROWS`, `PG_STATEMENT_TIMEOUT_MS`, `PG_SCHEMA_LIMIT` |
+| Backend database connection | `DATABASE_URL`, `PG_MAX_ROWS`, `PG_STATEMENT_TIMEOUT_MS`, `PG_SCHEMA_LIMIT`, `PG_SCHEMAS` |
 | Business rules | `BUSINESS_RULES_DIR`, `BUSINESS_RULE_MAX_FILE_BYTES`, `BUSINESS_RULE_MAX_RESULTS` |
 | LLM provider | `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT_SECONDS` |
 
-前端右侧配置面板也会显示同一组数据库和大模型配置。如果大模型配置缺失，后端仍可针对内置 `aiinfra` Schema 运行有限的本地演示回退逻辑；生产使用应配置真实的大模型服务。
+前端右侧配置面板也会显示同一组数据库和大模型配置。`PG_SCHEMAS` 为空时读取全部非系统 Schema；填写 `aiinfra,public` 这类逗号分隔值时，Agent 的 Schema 概览和表元数据收集会限定到这些 Schema。如果大模型配置缺失，后端仍可针对内置 `aiinfra` Schema 运行有限的本地演示回退逻辑；生产使用应配置真实的大模型服务。
 
-The frontend configuration panel shows the same database and model fields. If the model config is missing, the backend can still run a limited local demo fallback for the bundled `aiinfra` schema; production use should configure a real model provider.
+The frontend configuration panel shows the same database and model fields. Leave `PG_SCHEMAS` empty to read all non-system schemas; set comma-separated values such as `aiinfra,public` to scope the Agent schema overview and table metadata collection. If the model config is missing, the backend can still run a limited local demo fallback for the bundled `aiinfra` schema; production use should configure a real model provider.

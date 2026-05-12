@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 from typing import Any
 
 from backend.app.services.sql_guard import guard_select_sql
@@ -66,6 +67,7 @@ def list_schemas() -> list[str]:
 def list_tables(
     schema: str | None = None,
     *,
+    schemas: list[str] | None = None,
     limit: int | None = None,
     statement_timeout_ms: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -76,9 +78,11 @@ def list_tables(
         "t.table_schema <> 'information_schema'",
         "t.table_schema NOT LIKE 'pg_%%'",
     ]
-    if schema:
-        where.append("t.table_schema = %s")
-        params.append(schema)
+    schema_filter = _schema_filter(schema=schema, schemas=schemas, default_schemas=settings.pg_schemas)
+    if schema_filter:
+        placeholders = ", ".join(["%s"] * len(schema_filter))
+        where.append(f"t.table_schema IN ({placeholders})")
+        params.extend(schema_filter)
 
     query = f"""
         SELECT
@@ -177,13 +181,14 @@ def describe_table(
     }
 
 
-def schema_overview(*, limit: int | None = None) -> dict[str, Any]:
-    return collect_schema_metadata(limit=limit)
+def schema_overview(*, limit: int | None = None, schemas: list[str] | None = None) -> dict[str, Any]:
+    return collect_schema_metadata(limit=limit, schemas=schemas)
 
 
-def collect_schema_metadata(*, limit: int | None = None) -> dict[str, Any]:
+def collect_schema_metadata(*, limit: int | None = None, schemas: list[str] | None = None) -> dict[str, Any]:
     statement_timeout_ms = _metadata_timeout_ms()
-    tables = list_tables(limit=limit, statement_timeout_ms=statement_timeout_ms)
+    schema_filter = _schema_filter(schemas=schemas, default_schemas=_settings().pg_schemas)
+    tables = list_tables(schemas=schema_filter, limit=limit, statement_timeout_ms=statement_timeout_ms)
     if not tables:
         return {
             "tables": [],
@@ -191,6 +196,7 @@ def collect_schema_metadata(*, limit: int | None = None) -> dict[str, Any]:
             "failed_count": 0,
             "max_workers": METADATA_MAX_WORKERS,
             "statement_timeout_ms": statement_timeout_ms,
+            "schemas": schema_filter,
         }
 
     described: list[dict[str, Any] | None] = [None] * len(tables)
@@ -215,6 +221,7 @@ def collect_schema_metadata(*, limit: int | None = None) -> dict[str, Any]:
         "failed_count": sum(1 for item in result_tables if item.get("error")),
         "max_workers": METADATA_MAX_WORKERS,
         "statement_timeout_ms": statement_timeout_ms,
+        "schemas": schema_filter,
     }
 
 
@@ -246,6 +253,34 @@ def _failed_table_metadata(item: dict[str, Any], error: str) -> dict[str, Any]:
         "indexes": [],
         "error": error,
     }
+
+
+def _schema_filter(
+    *,
+    schema: str | None = None,
+    schemas: list[str] | None = None,
+    default_schemas: list[str] | None = None,
+) -> list[str]:
+    if schemas is None:
+        raw_values: list[str] = []
+        if schema is None and default_schemas:
+            raw_values.extend(default_schemas)
+    else:
+        raw_values = list(schemas)
+
+    if schema:
+        raw_values.append(schema)
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        for item in re.split(r"[\s,]+", str(raw_value)):
+            clean = item.strip()
+            if not clean or clean in seen:
+                continue
+            names.append(clean)
+            seen.add(clean)
+    return names
 
 
 def _settings():

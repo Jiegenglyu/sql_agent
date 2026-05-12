@@ -47,6 +47,7 @@ export interface SchemaMetadataResponse {
   failed_count: number;
   max_workers: number;
   statement_timeout_ms: number;
+  schemas: string[];
 }
 
 export interface AgentResponse {
@@ -104,6 +105,7 @@ export interface RuntimeConfigResponse {
   pg_max_rows: number;
   pg_statement_timeout_ms: number;
   pg_schema_limit: number;
+  pg_schemas: string[];
   database: DatabaseRuntimeConfig;
   llm: LlmRuntimeConfig;
 }
@@ -120,6 +122,7 @@ export interface RuntimeConfigUpdate {
   pg_max_rows?: number;
   pg_statement_timeout_ms?: number;
   pg_schema_limit?: number;
+  pg_schemas?: string[];
   llm_provider?: string;
   llm_base_url?: string;
   llm_model?: string;

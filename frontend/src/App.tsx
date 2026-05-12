@@ -84,6 +84,8 @@ interface CopyText {
   dbUser: string;
   dbPassword: string;
   sslmode: string;
+  dbSchemas: string;
+  dbSchemasHelp: string;
   timezone: string;
   maxRows: string;
   statementTimeout: string;
@@ -167,6 +169,8 @@ const COPY = {
     dbUser: "用户账号",
     dbPassword: "密码",
     sslmode: "SSL Mode",
+    dbSchemas: "Schema 范围",
+    dbSchemasHelp: "留空使用全部非系统 Schema；多个用逗号、空格或换行分隔。",
     timezone: "时区",
     maxRows: "最大返回行数",
     statementTimeout: "SQL 超时(ms)",
@@ -248,6 +252,8 @@ const COPY = {
     dbUser: "User",
     dbPassword: "Password",
     sslmode: "SSL Mode",
+    dbSchemas: "Schemas",
+    dbSchemasHelp: "Leave empty for all non-system schemas. Separate multiple schemas with commas, spaces, or new lines.",
     timezone: "Timezone",
     maxRows: "Max Rows",
     statementTimeout: "SQL Timeout(ms)",
@@ -322,6 +328,7 @@ interface ConfigForm {
   db_user: string;
   db_password: string;
   db_sslmode: string;
+  pg_schemas: string;
 }
 
 type ConfigTestTarget = "database" | "model";
@@ -521,7 +528,7 @@ function App() {
     setPreviewError(null);
     try {
       const schemaLimit = optionalNumber(configForm.pg_schema_limit);
-      const result = await getSchemaMetadata(schemaLimit);
+      const result = await getSchemaMetadata(schemaLimit, parseSchemaNames(configForm.pg_schemas));
       setMetadata(result);
       setSelectedTableId((current) => {
         if (current && result.tables.some((item) => tableKey(item) === current)) {
@@ -1249,6 +1256,13 @@ function SettingsPanel({
             <Field label={text.port} value={form.db_port} type="number" onChange={(value) => setField("db_port", value)} />
           </div>
           <Field label={text.dbName} value={form.db_name} onChange={(value) => setField("db_name", value)} />
+          <Field
+            label={text.dbSchemas}
+            value={form.pg_schemas}
+            placeholder="aiinfra, public"
+            help={text.dbSchemasHelp}
+            onChange={(value) => setField("pg_schemas", value)}
+          />
           <Field label={text.dbUser} value={form.db_user} onChange={(value) => setField("db_user", value)} />
           <Field
             label={text.dbPassword}
@@ -1358,18 +1372,21 @@ function Field({
   value,
   onChange,
   type = "text",
-  placeholder = ""
+  placeholder = "",
+  help
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   type?: "text" | "password" | "number";
   placeholder?: string;
+  help?: string;
 }) {
   return (
     <label className="field">
       <span>{label}</span>
       <input value={value} type={type} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+      {help && <small>{help}</small>}
     </label>
   );
 }
@@ -1640,7 +1657,8 @@ function emptyConfigForm(): ConfigForm {
     db_name: "",
     db_user: "",
     db_password: "",
-    db_sslmode: ""
+    db_sslmode: "",
+    pg_schemas: ""
   };
 }
 
@@ -1660,7 +1678,8 @@ function configToForm(config: RuntimeConfigResponse): ConfigForm {
     db_name: config.database.database ?? "",
     db_user: config.database.username ?? "",
     db_password: "",
-    db_sslmode: config.database.sslmode ?? ""
+    db_sslmode: config.database.sslmode ?? "",
+    pg_schemas: config.pg_schemas.join(", ")
   };
 }
 
@@ -1686,6 +1705,8 @@ function formToPayload(form: ConfigForm): RuntimeConfigUpdate {
   if (pgSchemaLimit !== undefined) {
     payload.pg_schema_limit = pgSchemaLimit;
   }
+
+  payload.pg_schemas = parseSchemaNames(form.pg_schemas);
 
   const llmProvider = form.llm_provider.trim();
   if (llmProvider) {
@@ -1754,6 +1775,22 @@ function formToPayload(form: ConfigForm): RuntimeConfigUpdate {
 
 function tableKey(item: Pick<TableMetadata, "schema" | "table">) {
   return JSON.stringify([item.schema, item.table]);
+}
+
+function parseSchemaNames(value: string) {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  value
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => {
+      if (!seen.has(item)) {
+        seen.add(item);
+        names.push(item);
+      }
+    });
+  return names;
 }
 
 function metadataValue(item: Record<string, unknown>, key: string) {

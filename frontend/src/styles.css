@@ -828,6 +828,13 @@ legend {
   font-weight: 800;
 }
 
+.field small {
+  color: #667386;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .field input {
   background: #ffffff;
   border: 1px solid #cbd5e1;

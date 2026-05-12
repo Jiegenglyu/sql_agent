@@ -84,6 +84,7 @@ class SchemaMetadataResponse(BaseModel):
     failed_count: int = 0
     max_workers: int = 4
     statement_timeout_ms: int = 5000
+    schemas: list[str] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
@@ -128,6 +129,7 @@ class RuntimeConfigResponse(BaseModel):
     pg_max_rows: int
     pg_statement_timeout_ms: int
     pg_schema_limit: int
+    pg_schemas: list[str] = Field(default_factory=list)
     database: DatabaseRuntimeConfig
     llm: LlmRuntimeConfig
 
@@ -144,6 +146,7 @@ class RuntimeConfigUpdate(BaseModel):
     pg_max_rows: int | None = Field(default=None, ge=1, le=5000)
     pg_statement_timeout_ms: int | None = Field(default=None, ge=100, le=120000)
     pg_schema_limit: int | None = Field(default=None, ge=1, le=500)
+    pg_schemas: list[str] | None = Field(default=None, max_length=50)
 
     llm_provider: str | None = Field(default=None, max_length=100)
     llm_base_url: str | None = Field(default=None, max_length=500)

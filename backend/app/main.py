@@ -98,17 +98,20 @@ def api_rule_search(q: str = Query(min_length=1, max_length=500)) -> RuleSearchR
 
 
 @app.get(f"{api_prefix}/schema")
-def api_schema() -> dict:
+def api_schema(schema: list[str] | None = Query(default=None)) -> dict:
     try:
-        return schema_overview()
+        return schema_overview(schemas=schema)
     except DatabaseError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get(f"{api_prefix}/schema/metadata", response_model=SchemaMetadataResponse)
-async def api_schema_metadata(limit: int | None = Query(default=None, ge=1, le=500)) -> SchemaMetadataResponse:
+async def api_schema_metadata(
+    limit: int | None = Query(default=None, ge=1, le=500),
+    schema: list[str] | None = Query(default=None),
+) -> SchemaMetadataResponse:
     try:
-        metadata = await run_in_threadpool(collect_schema_metadata, limit=limit)
+        metadata = await run_in_threadpool(collect_schema_metadata, limit=limit, schemas=schema)
     except DatabaseError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return SchemaMetadataResponse(**metadata)

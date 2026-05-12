@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Annotated
 
 from pydantic import Field, field_validator
@@ -28,6 +29,7 @@ class Settings(BaseSettings):
     pg_max_rows: int = Field(default=200, alias="PG_MAX_ROWS")
     pg_statement_timeout_ms: int = Field(default=5000, alias="PG_STATEMENT_TIMEOUT_MS")
     pg_schema_limit: int = Field(default=80, alias="PG_SCHEMA_LIMIT")
+    pg_schemas: Annotated[list[str], NoDecode] = Field(default_factory=list, alias="PG_SCHEMAS")
 
     business_rules_dir: Path = Field(
         default=Path("backend/business_rules"),
@@ -50,6 +52,15 @@ class Settings(BaseSettings):
     def split_cors_origins(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("pg_schemas", mode="before")
+    @classmethod
+    def split_pg_schemas(cls, value: object) -> object:
+        if isinstance(value, str):
+            return _unique_clean_names(value)
+        if isinstance(value, list):
+            return _unique_clean_names(value)
         return value
 
     @field_validator("api_prefix")
@@ -97,3 +108,22 @@ def get_settings() -> Settings:
 def reload_settings() -> Settings:
     _get_settings.cache_clear()
     return get_settings()
+
+
+def _unique_clean_names(value: str | list[object]) -> list[str]:
+    raw_items: list[object]
+    if isinstance(value, str):
+        raw_items = re.split(r"[\s,]+", value)
+    else:
+        raw_items = value
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_items:
+        for item in re.split(r"[\s,]+", str(raw_item)):
+            clean = item.strip()
+            if not clean or clean in seen:
+                continue
+            names.append(clean)
+            seen.add(clean)
+    return names
