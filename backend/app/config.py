@@ -40,6 +40,8 @@ class Settings(BaseSettings):
         alias="BUSINESS_RULE_MAX_FILE_BYTES",
     )
     business_rule_max_results: int = Field(default=8, alias="BUSINESS_RULE_MAX_RESULTS")
+    agent_verbose_debug: bool = Field(default=False, alias="AGENT_VERBOSE_DEBUG")
+    agent_debug_log_path: Path = Field(default=Path("logs/agent-debug.log"), alias="AGENT_DEBUG_LOG_PATH")
 
     llm_provider: str = Field(default="manual", alias="LLM_PROVIDER")
     llm_base_url: str | None = Field(default=None, alias="LLM_BASE_URL")

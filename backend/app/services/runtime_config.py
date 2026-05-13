@@ -29,6 +29,7 @@ def read_runtime_config() -> dict[str, Any]:
         "pg_statement_timeout_ms": settings.pg_statement_timeout_ms,
         "pg_schema_limit": settings.pg_schema_limit,
         "pg_schemas": settings.pg_schemas,
+        "agent_verbose_debug": settings.agent_verbose_debug,
         "database": parsed_database,
         "llm": {
             "provider": settings.llm_provider,
@@ -52,6 +53,7 @@ def update_runtime_config(update: RuntimeConfigUpdate) -> dict[str, Any]:
     _set_optional(values, "PG_SCHEMA_LIMIT", update.pg_schema_limit)
     if update.pg_schemas is not None:
         values["PG_SCHEMAS"] = _format_schema_list(update.pg_schemas)
+    _set_optional_bool(values, "AGENT_VERBOSE_DEBUG", update.agent_verbose_debug)
     _set_optional(values, "LLM_PROVIDER", update.llm_provider)
     _set_optional(values, "LLM_BASE_URL", update.llm_base_url)
     _set_optional(values, "LLM_MODEL", update.llm_model)
@@ -338,6 +340,11 @@ def _set_optional(values: dict[str, str | None], key: str, value: object) -> Non
     plain = _plain_value(value)
     if plain is not None:
         values[key] = plain
+
+
+def _set_optional_bool(values: dict[str, str | None], key: str, value: bool | None) -> None:
+    if value is not None:
+        values[key] = "true" if value else "false"
 
 
 def _format_schema_list(values: list[str]) -> str:

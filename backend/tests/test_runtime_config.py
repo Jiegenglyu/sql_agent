@@ -7,6 +7,7 @@ from backend.app.models import RuntimeConfigUpdate
 from backend.app.services.runtime_config import (
     _database_url_from_update,
     _format_schema_list,
+    _set_optional_bool,
     _plain_value,
     _secret_value,
     build_database_url,
@@ -23,6 +24,14 @@ class RuntimeConfigTests(unittest.TestCase):
 
     def test_schema_list_is_normalized_for_env(self) -> None:
         self.assertEqual("aiinfra,public", _format_schema_list([" aiinfra ", "public", "aiinfra", ""]))
+
+    def test_optional_bool_is_written_as_env_bool(self) -> None:
+        values: dict[str, str | None] = {}
+
+        _set_optional_bool(values, "AGENT_VERBOSE_DEBUG", True)
+        _set_optional_bool(values, "UNCHANGED", None)
+
+        self.assertEqual(values, {"AGENT_VERBOSE_DEBUG": "true"})
 
     def test_blank_database_password_preserves_env_password(self) -> None:
         current_url = build_database_url(

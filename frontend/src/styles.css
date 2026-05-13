@@ -376,6 +376,12 @@ button:disabled {
   font-weight: 800;
 }
 
+.streaming-indicator {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+
 .message-bubble {
   background: #f8fafc;
   border: 1px solid #dce4ee;
@@ -846,6 +852,82 @@ legend {
   width: 100%;
 }
 
+.toggle-field {
+  align-items: center;
+  border: 1px solid #dce4ee;
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 10px;
+}
+
+.toggle-field input {
+  height: 1px;
+  opacity: 0;
+  position: absolute;
+  width: 1px;
+}
+
+.toggle-control {
+  background: #cbd5e1;
+  border-radius: 999px;
+  display: inline-flex;
+  height: 22px;
+  padding: 3px;
+  transition: background 0.15s ease;
+  width: 40px;
+}
+
+.toggle-control span {
+  background: #ffffff;
+  border-radius: 999px;
+  display: block;
+  height: 16px;
+  transition: transform 0.15s ease;
+  width: 16px;
+}
+
+.toggle-field input:checked + .toggle-control {
+  background: #0f766e;
+}
+
+.toggle-field input:checked + .toggle-control span {
+  transform: translateX(18px);
+}
+
+.toggle-field:focus-within {
+  border-color: #0f766e;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+}
+
+.toggle-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.toggle-copy strong {
+  color: #263345;
+  font-size: 13px;
+}
+
+.toggle-copy small {
+  color: #667386;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.toggle-state {
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .form-grid {
   display: grid;
   gap: 10px;
@@ -1034,6 +1116,25 @@ legend {
   margin-top: 12px;
 }
 
+.rule-hit-banner {
+  align-items: flex-start;
+  background: #eef7f5;
+  border: 1px solid #b8d9d4;
+  border-radius: 8px;
+  color: #245b55;
+  display: grid;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 7px;
+  grid-template-columns: 16px 1fr;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.rule-hit-banner span {
+  overflow-wrap: anywhere;
+}
+
 .agent-artifacts details {
   border-top: 1px solid #dce4ee;
   padding-top: 8px;
@@ -1067,6 +1168,17 @@ legend {
   line-height: 1.45;
   margin: 3px 0;
   overflow-wrap: anywhere;
+}
+
+.compact-line.muted {
+  color: #69758a;
+  margin-left: 8px;
+}
+
+.rule-hit-inline {
+  display: grid;
+  gap: 2px;
+  margin: 3px 0 6px;
 }
 
 .inline-result {

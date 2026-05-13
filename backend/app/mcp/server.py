@@ -86,9 +86,9 @@ def business_rule_search(query: str, limit: int = 8) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def business_rule_read(path: str) -> dict[str, Any]:
-    """Read a single business rule file by relative path."""
-    return read_rule(path)
+def business_rule_read(path: str, start_line: int | None = None, end_line: int | None = None) -> dict[str, Any]:
+    """Read a business rule file, optionally limited to a 1-based line range."""
+    return read_rule(path, start_line=start_line, end_line=end_line)
 
 
 @mcp.tool()

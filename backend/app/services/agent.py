@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
+from datetime import datetime, timezone
 import json
+import logging
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 from backend.app.models import AgentQueryRequest, AgentQueryResponse, TraceStep
@@ -14,6 +18,10 @@ from backend.app.services.llm import (
 )
 from backend.app.services.token_usage import begin_token_usage, finish_token_usage
 
+
+LOGGER = logging.getLogger("sql_agent.agent")
+TraceCallback = Callable[[TraceStep], None]
+_TRACE_CALLBACK: ContextVar[TraceCallback | None] = ContextVar("agent_trace_callback", default=None)
 
 DEFAULT_VALIDATION: dict[str, Any] = {
     "ok": False,
@@ -43,7 +51,7 @@ AGENT_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "business_rule_search",
-            "description": "Search business metric definitions and calculation rules.",
+            "description": "Search business metric definitions and calculation rules across the configured rule directory.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -51,6 +59,44 @@ AGENT_TOOL_SPECS: list[dict[str, Any]] = [
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "business_rule_list",
+            "description": "List available business rule files when choosing which rule document to inspect.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "business_rule_read",
+            "description": (
+                "Read a selected business rule file or line range after search identifies the relevant document. "
+                "Use the relative path returned by business_rule_search or business_rule_list."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based start line for reading a focused rule section.",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based end line for reading a focused rule section.",
+                    },
+                },
+                "required": ["path"],
             },
         },
     },
@@ -115,10 +161,11 @@ AGENT_TOOL_SPECS: list[dict[str, Any]] = [
 ]
 
 
-def run_agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
+def run_agent_query(request: AgentQueryRequest, on_trace: TraceCallback | None = None) -> AgentQueryResponse:
     trace: list[TraceStep] = []
     usage_token = begin_token_usage()
     usage_finished = False
+    trace_callback_token = _TRACE_CALLBACK.set(on_trace)
 
     try:
         if is_llm_configured():
@@ -126,7 +173,9 @@ def run_agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
                 response = _run_tool_calling_agent(request, trace)
                 usage = finish_token_usage(usage_token)
                 usage_finished = True
-                return response.model_copy(update={"token_usage": usage})
+                response = response.model_copy(update={"token_usage": usage})
+                _log_agent_debug("agent.final", response.model_dump(mode="json", by_alias=True))
+                return response
             except LLMNotConfigured as exc:
                 _append_trace(trace, "llm_agent_loop", "warning", str(exc), {"mode": "tool_calling"})
             except Exception as exc:
@@ -141,11 +190,19 @@ def run_agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
         response = _run_orchestrated_agent(request, trace)
         usage = finish_token_usage(usage_token)
         usage_finished = True
-        return response.model_copy(update={"token_usage": usage})
+        response = response.model_copy(update={"token_usage": usage})
+        _log_agent_debug("agent.final", response.model_dump(mode="json", by_alias=True))
+        return response
     except Exception:
         if not usage_finished:
             finish_token_usage(usage_token)
+        _log_agent_debug(
+            "agent.error",
+            {"question": request.question, "trace": [step.model_dump(mode="json") for step in trace]},
+        )
         raise
+    finally:
+        _TRACE_CALLBACK.reset(trace_callback_token)
 
 
 def _run_tool_calling_agent(request: AgentQueryRequest, trace: list[TraceStep]) -> AgentQueryResponse:
@@ -159,7 +216,7 @@ def _run_tool_calling_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
                 f"Question: {request.question}\n"
                 f"Language: {language}\n"
                 f"Max rows: {max_rows}\n"
-                "Use MCP tools to inspect date context, business rules, schema, validate SQL, "
+                "Use MCP tools to inspect date context, search and read business rules, schema, validate SQL, "
                 "and query PostgreSQL. Final answer should summarize the readonly query result."
             ),
         },
@@ -215,10 +272,31 @@ def _run_tool_calling_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
             arguments = _parse_tool_arguments(function.get("arguments"))
             output = _call_mcp_tool(name, arguments)
 
+            if name == "business_rule_search" and isinstance(output, list):
+                rules = output
+                _append_trace(
+                    trace,
+                    f"mcp.{name}",
+                    "success",
+                    _tool_summary(name, output),
+                    {"arguments": arguments, "result": _preview(output)},
+                )
+                rules = _read_relevant_business_rules(trace, rules)
+                output = rules
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id") or f"tool-{tool_call_count}",
+                        "name": name,
+                        "content": _json_text(output),
+                    }
+                )
+                continue
+
             if name == "current_date_context" and isinstance(output, dict):
                 date_context = output
-            elif name == "business_rule_search" and isinstance(output, list):
-                rules = output
+            elif name == "business_rule_read" and isinstance(output, dict):
+                rules = _merge_rule_read_result(rules, output)
             elif name == "pg_schema_overview" and isinstance(output, dict):
                 schema = output
             elif name == "pg_validate_sql" and isinstance(output, dict):
@@ -271,6 +349,8 @@ def _run_orchestrated_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
 
     date_context = _safe_tool_call(trace, "current_date_context", {}) or {}
     rules = _safe_tool_call(trace, "business_rule_search", {"query": request.question, "limit": 8}) or []
+    if isinstance(rules, list):
+        rules = _read_relevant_business_rules(trace, rules)
     schema = _safe_tool_call(trace, "pg_schema_overview", {"limit": 80})
     if not isinstance(schema, dict):
         schema = None
@@ -352,8 +432,15 @@ def _generate_sql(
         generated = None
 
     if generated:
-        _append_trace(trace, "sql_generation", "success", "Generated SQL with the configured LLM.", {"mode": "llm"})
-        return _strip_markdown_sql(generated)
+        sql = _strip_markdown_sql(generated)
+        _append_trace(
+            trace,
+            "sql_generation",
+            "success",
+            "Generated SQL with the configured LLM.",
+            {"mode": "llm", "sql": sql},
+        )
+        return sql
 
     demo_sql = _demo_sql_from_question(request.question, schema, date_context)
     if demo_sql:
@@ -362,7 +449,7 @@ def _generate_sql(
             "sql_generation",
             "success",
             "Generated SQL with the local demo fallback.",
-            {"mode": "demo_fallback"},
+            {"mode": "demo_fallback", "sql": demo_sql},
         )
         return demo_sql
 
@@ -374,6 +461,93 @@ def _generate_sql(
         {"mode": "manual"},
     )
     return "SELECT 1 AS agent_ready"
+
+
+def _read_relevant_business_rules(
+    trace: list[TraceStep],
+    rules: list[Any],
+    *,
+    max_files: int = 3,
+    context_before: int = 3,
+    context_after: int = 10,
+) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for index, item in enumerate(rules):
+        if not isinstance(item, dict):
+            continue
+        rule = dict(item)
+        path = str(rule.get("path") or "")
+        if not path or index >= max_files:
+            expanded.append(rule)
+            continue
+
+        arguments: dict[str, Any] = {"path": path}
+        snippet_line = _first_rule_snippet_line(rule)
+        if snippet_line is not None:
+            arguments["start_line"] = max(1, snippet_line - context_before)
+            arguments["end_line"] = snippet_line + context_after
+
+        read_result = _safe_tool_call(trace, "business_rule_read", arguments)
+        if isinstance(read_result, dict):
+            expanded.append(_merge_rule_context(rule, read_result))
+        else:
+            expanded.append(rule)
+    return expanded
+
+
+def _first_rule_snippet_line(rule: dict[str, Any]) -> int | None:
+    snippets = rule.get("snippets")
+    if not isinstance(snippets, list):
+        return None
+    for snippet in snippets:
+        if not isinstance(snippet, dict):
+            continue
+        try:
+            line = int(snippet.get("line"))
+        except (TypeError, ValueError):
+            continue
+        if line > 0:
+            return line
+    return None
+
+
+def _merge_rule_read_result(rules: list[dict[str, Any]], read_result: dict[str, Any]) -> list[dict[str, Any]]:
+    path = str(read_result.get("path") or "")
+    if not path:
+        return rules
+
+    merged_rules: list[dict[str, Any]] = []
+    found = False
+    for rule in rules:
+        if str(rule.get("path") or "") == path:
+            merged_rules.append(_merge_rule_context(rule, read_result))
+            found = True
+        else:
+            merged_rules.append(rule)
+
+    if not found:
+        merged_rules.append(
+            _merge_rule_context(
+                {"path": path, "score": 0, "snippets": read_result.get("snippets") or []},
+                read_result,
+            )
+        )
+    return merged_rules
+
+
+def _merge_rule_context(rule: dict[str, Any], read_result: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(rule)
+    read_snippets = read_result.get("snippets")
+    if not merged.get("snippets") and isinstance(read_snippets, list):
+        merged["snippets"] = read_snippets
+    if isinstance(read_snippets, list):
+        merged["read_snippets"] = read_snippets
+    merged["content"] = str(read_result.get("content") or "")
+    merged["read_start_line"] = read_result.get("start_line")
+    merged["read_end_line"] = read_result.get("end_line")
+    merged["line_count"] = read_result.get("line_count")
+    merged["read_truncated"] = bool(read_result.get("truncated"))
+    return merged
 
 
 def _safe_tool_call(trace: list[TraceStep], name: str, arguments: dict[str, Any]) -> Any:
@@ -404,7 +578,9 @@ def _mcp_tool_registry() -> dict[str, Callable[..., Any]]:
 
     return {
         "current_date_context": server.current_date_context,
+        "business_rule_list": server.business_rule_list,
         "business_rule_search": server.business_rule_search,
+        "business_rule_read": server.business_rule_read,
         "pg_schema_overview": server.pg_schema_overview,
         "pg_describe_table": server.pg_describe_table,
         "pg_validate_sql": server.pg_validate_sql,
@@ -418,7 +594,9 @@ def _system_prompt(language: str) -> str:
         "You are a readonly business data Agent for PostgreSQL. "
         "You must use the MCP tools before answering data questions. "
         "For relative dates such as today, yesterday, this week, or latest day, call current_date_context first. "
-        "Search business_rule_search for metric definitions. Inspect pg_schema_overview before writing SQL. "
+        "Use business_rule_search to find metric definitions, then use business_rule_read to inspect the relevant file or line range before writing SQL. "
+        "Use business_rule_list only when the search result is ambiguous or missing likely files. "
+        "Inspect pg_schema_overview before writing SQL. "
         "Validate SQL with pg_validate_sql before pg_query. "
         "Only query through pg_query; it enforces a readonly SELECT/WITH policy. "
         f"Answer in {language_instruction}, concisely, and never invent data."
@@ -444,21 +622,31 @@ def _append_trace(
     summary: str,
     detail: dict[str, Any],
 ) -> None:
-    trace.append(
-        TraceStep(
-            name=name,
-            status=status,  # type: ignore[arg-type]
-            summary=summary,
-            detail=_json_safe(detail),
-        )
+    step = TraceStep(
+        name=name,
+        status=status,  # type: ignore[arg-type]
+        summary=summary,
+        detail=_json_safe(detail),
     )
+    trace.append(step)
+    _emit_trace(step)
+    _log_agent_debug("agent.trace", step.model_dump(mode="json"))
 
 
 def _tool_summary(name: str, output: Any) -> str:
     if name == "current_date_context" and isinstance(output, dict):
         return f"Resolved today as {output.get('today')} in {output.get('timezone')}."
+    if name == "business_rule_list" and isinstance(output, list):
+        return f"Listed {len(output)} business rule file(s)."
     if name == "business_rule_search" and isinstance(output, list):
-        return f"Found {len(output)} matching business rule file(s)."
+        return _business_rule_summary(output)
+    if name == "business_rule_read" and isinstance(output, dict):
+        path = output.get("path")
+        start_line = output.get("start_line")
+        end_line = output.get("end_line")
+        if start_line and end_line:
+            return f"Read business rule {path}:L{start_line}-L{end_line}."
+        return f"Read business rule {path}."
     if name == "pg_schema_overview" and isinstance(output, dict):
         return f"Loaded {output.get('table_count', 0)} table(s) from PostgreSQL."
     if name == "pg_validate_sql" and isinstance(output, dict):
@@ -468,9 +656,72 @@ def _tool_summary(name: str, output: Any) -> str:
     return "MCP tool call completed."
 
 
+def _business_rule_summary(rules: list[Any]) -> str:
+    if not rules:
+        return "Found 0 matching business rule file(s)."
+
+    labels: list[str] = []
+    for item in rules[:3]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        snippets = item.get("snippets")
+        line = None
+        if isinstance(snippets, list) and snippets and isinstance(snippets[0], dict):
+            line = snippets[0].get("line")
+        labels.append(f"{path}:L{line}" if path and line else path)
+
+    suffix = "" if len(rules) <= 3 else f", +{len(rules) - 3} more"
+    return f"Found {len(rules)} matching business rule file(s): {', '.join(labels)}{suffix}."
+
+
+def _emit_trace(step: TraceStep) -> None:
+    callback = _TRACE_CALLBACK.get()
+    if callback is None:
+        return
+    try:
+        callback(step)
+    except Exception:
+        LOGGER.exception("Agent trace callback failed.")
+
+
+def _log_agent_debug(label: str, payload: Any) -> None:
+    log_path = _agent_debug_log_path()
+    if log_path is None:
+        return
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": label,
+        "payload": _json_safe(payload),
+    }
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        LOGGER.exception("Failed to write Agent debug log.")
+
+
+def _agent_debug_log_path() -> Path | None:
+    try:
+        from backend.app.config import PROJECT_ROOT, get_settings
+
+        settings = get_settings()
+        if not settings.agent_verbose_debug:
+            return None
+        log_path = settings.agent_debug_log_path.expanduser()
+        if not log_path.is_absolute():
+            log_path = PROJECT_ROOT / log_path
+        return log_path.resolve()
+    except Exception:
+        return None
+
+
 def _preview(value: Any) -> Any:
     if isinstance(value, dict):
         preview = dict(value)
+        if "content" in preview and isinstance(preview["content"], str) and len(preview["content"]) > 1200:
+            preview["content"] = preview["content"][:1200] + "...[truncated]"
         if "rows" in preview and isinstance(preview["rows"], list):
             preview["rows"] = preview["rows"][:3]
         if "tables" in preview and isinstance(preview["tables"], list):

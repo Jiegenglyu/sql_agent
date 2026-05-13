@@ -27,7 +27,7 @@ import {
   getRuntimeConfig,
   getSchemaMetadata,
   previewTable,
-  queryAgent,
+  queryAgentStream,
   testDatabaseConfig,
   testLlmConfig,
   updateRuntimeConfig
@@ -37,6 +37,7 @@ import type {
   ConfigTestResponse,
   HealthResponse,
   QueryResult,
+  RuleSearchResult,
   RuntimeConfigResponse,
   RuntimeConfigUpdate,
   SchemaMetadataResponse,
@@ -90,6 +91,10 @@ interface CopyText {
   maxRows: string;
   statementTimeout: string;
   schemaLimit: string;
+  verboseDebug: string;
+  verboseDebugHelp: string;
+  enabled: string;
+  disabled: string;
   secretPlaceholder: string;
   dbReady: string;
   dbMissing: string;
@@ -175,6 +180,10 @@ const COPY = {
     maxRows: "最大返回行数",
     statementTimeout: "SQL 超时(ms)",
     schemaLimit: "Schema 表数量",
+    verboseDebug: "详细调试",
+    verboseDebugHelp: "开启后，后端会把 Agent 每一步 trace 和完整最终响应写入 logs/agent-debug.log。",
+    enabled: "已开启",
+    disabled: "已关闭",
     secretPlaceholder: "留空保持不变",
     dbReady: "PG 已配置",
     dbMissing: "PG 未配置",
@@ -258,6 +267,10 @@ const COPY = {
     maxRows: "Max Rows",
     statementTimeout: "SQL Timeout(ms)",
     schemaLimit: "Schema Tables",
+    verboseDebug: "Verbose Debug",
+    verboseDebugHelp: "When enabled, the backend writes every Agent trace step and the full final response to logs/agent-debug.log.",
+    enabled: "Enabled",
+    disabled: "Disabled",
     secretPlaceholder: "Leave blank to keep current",
     dbReady: "PG configured",
     dbMissing: "PG missing",
@@ -310,6 +323,7 @@ interface ChatMessage {
   content: string;
   agent?: AgentResponse;
   error?: boolean;
+  streaming?: boolean;
 }
 
 interface ConfigForm {
@@ -329,6 +343,7 @@ interface ConfigForm {
   db_password: string;
   db_sslmode: string;
   pg_schemas: string;
+  agent_verbose_debug: boolean;
 }
 
 type ConfigTestTarget = "database" | "model";
@@ -459,26 +474,64 @@ function App() {
     }
 
     const userMessage: ChatMessage = { id: createId(), role: "user", content: question };
-    setMessages((items) => [...items, userMessage]);
+    const assistantId = createId();
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: text.sending,
+      agent: createEmptyAgentResponse(question),
+      streaming: true
+    };
+    setMessages((items) => [...items, userMessage, assistantMessage]);
     setDraft("");
     setBusy(true);
     setError(null);
 
+    const updateAssistantMessage = (updater: (message: ChatMessage) => ChatMessage) => {
+      setMessages((items) => items.map((item) => (item.id === assistantId ? updater(item) : item)));
+    };
+
     try {
-      const agent = await queryAgent(question, language);
-      setMessages((items) => [
-        ...items,
-        {
-          id: createId(),
-          role: "assistant",
-          content: agent.answer || text.noRows,
-          agent
+      let receivedFinal = false;
+      const agent = await queryAgentStream(question, language, {
+        onTrace: (step) => {
+          updateAssistantMessage((message) => {
+            const nextAgent = applyTraceToAgent(message.agent ?? createEmptyAgentResponse(question), step);
+            return {
+              ...message,
+              content: `${step.name}: ${step.summary || text.sending}`,
+              agent: nextAgent,
+              streaming: true
+            };
+          });
+        },
+        onFinal: (finalAgent) => {
+          receivedFinal = true;
+          updateAssistantMessage((message) => ({
+            ...message,
+            content: finalAgent.answer || text.noRows,
+            agent: finalAgent,
+            streaming: false
+          }));
         }
-      ]);
+      });
+      if (!receivedFinal) {
+        updateAssistantMessage((message) => ({
+          ...message,
+          content: agent.answer || text.noRows,
+          agent,
+          streaming: false
+        }));
+      }
       setHealth(await getHealth());
     } catch (err) {
       const message = err instanceof Error ? formatError(err.message) : String(err);
-      setMessages((items) => [...items, { id: createId(), role: "assistant", content: message, error: true }]);
+      updateAssistantMessage((item) => ({
+        ...item,
+        content: message,
+        error: true,
+        streaming: false
+      }));
       setError(message);
     } finally {
       setBusy(false);
@@ -660,17 +713,6 @@ function App() {
               {messages.map((message) => (
                 <ChatMessageView key={message.id} message={message} text={text} />
               ))}
-              {busy && (
-                <div className="message assistant">
-                  <div className="message-avatar">
-                    <Loader2 className="spin" size={16} />
-                  </div>
-                  <div className="message-body">
-                    <div className="message-meta">Agent</div>
-                    <div className="message-bubble">{text.sending}</div>
-                  </div>
-                </div>
-              )}
             </div>
 
             <form className="chat-composer" onSubmit={handleComposerSubmit}>
@@ -724,6 +766,12 @@ function ChatMessageView({ message, text }: { message: ChatMessage; text: CopyTe
       <div className="message-body">
         <div className="message-meta">
           {isAssistant ? "Agent" : "You"}
+          {message.streaming && (
+            <span className="streaming-indicator">
+              <Loader2 className="spin" size={12} />
+              {text.sending}
+            </span>
+          )}
           {message.agent && <span>{formatUsage(message.agent.token_usage, text)}</span>}
         </div>
         <div className="message-bubble">
@@ -740,7 +788,15 @@ function AgentArtifacts({ agent, text }: { agent: AgentResponse; text: CopyText 
   const schemaTables = Array.isArray(rawSchemaTables) ? rawSchemaTables.slice(0, 8) : [];
   return (
     <div className="agent-artifacts">
-      <details className="agent-detail">
+      {agent.rules.length > 0 && (
+        <div className="rule-hit-banner">
+          <Search size={14} />
+          <span>
+            {text.businessRules}: {formatRuleHit(agent.rules[0])}
+          </span>
+        </div>
+      )}
+      <details className="agent-detail" open={agent.trace.length > 0 && !agent.answer}>
         <summary>{text.answerDetails}</summary>
         {agent.result && <InlineResultTable result={agent.result} text={text} />}
         {agent.sql ? <pre className="sql-preview inline">{agent.sql}</pre> : <p className="empty-state slim">{text.emptySql}</p>}
@@ -758,7 +814,16 @@ function AgentArtifacts({ agent, text }: { agent: AgentResponse; text: CopyText 
             <strong>{text.businessRules}</strong>
             {agent.rules.length === 0 && <p className="empty-state slim">{text.emptyRules}</p>}
             {agent.rules.slice(0, 4).map((rule) => (
-              <p className="compact-line" key={rule.path}>{rule.path}</p>
+              <div className="rule-hit-inline" key={rule.path}>
+                <p className="compact-line">
+                  {rule.path} · score {rule.score}
+                </p>
+                {rule.snippets.slice(0, 2).map((snippet) => (
+                  <p className="compact-line muted" key={`${rule.path}-${snippet.line}`}>
+                    L{snippet.line}: {snippet.text}
+                  </p>
+                ))}
+              </div>
             ))}
           </div>
           <div>
@@ -1312,6 +1377,13 @@ function SettingsPanel({
             type="number"
             onChange={(value) => setField("pg_statement_timeout_ms", value)}
           />
+          <ToggleField
+            label={text.verboseDebug}
+            checked={form.agent_verbose_debug}
+            checkedLabel={form.agent_verbose_debug ? text.enabled : text.disabled}
+            help={text.verboseDebugHelp}
+            onChange={(checked) => setField("agent_verbose_debug", checked)}
+          />
           </fieldset>
         )}
 
@@ -1387,6 +1459,34 @@ function Field({
       <span>{label}</span>
       <input value={value} type={type} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
       {help && <small>{help}</small>}
+    </label>
+  );
+}
+
+function ToggleField({
+  label,
+  checked,
+  checkedLabel,
+  help,
+  onChange
+}: {
+  label: string;
+  checked: boolean;
+  checkedLabel: string;
+  help: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="toggle-field">
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <span className="toggle-control" aria-hidden="true">
+        <span />
+      </span>
+      <span className="toggle-copy">
+        <strong>{label}</strong>
+        <small>{help}</small>
+      </span>
+      <span className="toggle-state">{checkedLabel}</span>
     </label>
   );
 }
@@ -1641,6 +1741,151 @@ function InlineResultTable({ result, text }: { result: QueryResult; text: CopyTe
   );
 }
 
+function createEmptyAgentResponse(question: string): AgentResponse {
+  return {
+    question,
+    answer: "",
+    sql: "",
+    executed: false,
+    trace: [],
+    rules: [],
+    schema: null,
+    validation: {
+      ok: false,
+      reason: null,
+      normalized_sql: null,
+      limited_sql: null
+    },
+    result: null,
+    token_usage: { ...EMPTY_USAGE }
+  };
+}
+
+function applyTraceToAgent(agent: AgentResponse, step: TraceStep): AgentResponse {
+  const next: AgentResponse = {
+    ...agent,
+    trace: [...agent.trace, step]
+  };
+  const detail = step.detail ?? {};
+  const argumentsDetail = asRecord(detail.arguments);
+  const resultDetail = detail.result;
+  const sqlFromDetail = typeof detail.sql === "string" ? detail.sql : undefined;
+  const sqlFromArguments = typeof argumentsDetail?.sql === "string" ? argumentsDetail.sql : undefined;
+
+  if (sqlFromDetail || sqlFromArguments) {
+    next.sql = sqlFromDetail ?? sqlFromArguments ?? next.sql;
+  }
+
+  if (step.name === "mcp.business_rule_search" && Array.isArray(resultDetail)) {
+    next.rules = normalizeRuleResults(resultDetail);
+  } else if (step.name === "mcp.business_rule_read") {
+    const [readRule] = normalizeRuleResults([resultDetail]);
+    if (readRule) {
+      next.rules = mergeRuleReadResult(next.rules, readRule);
+    }
+  } else if (step.name === "mcp.pg_schema_overview") {
+    next.schema = asRecord(resultDetail);
+  } else if (step.name === "mcp.pg_validate_sql") {
+    next.validation = normalizeValidation(resultDetail) ?? next.validation;
+  } else if (step.name === "mcp.pg_query") {
+    next.result = normalizeQueryResult(resultDetail) ?? next.result;
+    next.executed = step.status === "success";
+  }
+
+  return next;
+}
+
+function normalizeRuleResults(value: unknown[]): RuleSearchResult[] {
+  return value.flatMap((item) => {
+    const record = asRecord(item);
+    if (!record || typeof record.path !== "string") {
+      return [];
+    }
+    return [
+      {
+        path: record.path,
+        score: Number(record.score ?? 0),
+        snippets: normalizeSnippets(record.snippets),
+        read_snippets: normalizeSnippets(record.read_snippets),
+        content: typeof record.content === "string" ? record.content : undefined,
+        read_start_line: optionalRecordNumber(record.read_start_line),
+        read_end_line: optionalRecordNumber(record.read_end_line),
+        line_count: optionalRecordNumber(record.line_count),
+        read_truncated: typeof record.read_truncated === "boolean" ? record.read_truncated : undefined
+      }
+    ];
+  });
+}
+
+function normalizeSnippets(value: unknown) {
+  return Array.isArray(value)
+    ? value.flatMap((snippet) => {
+        const snippetRecord = asRecord(snippet);
+        if (!snippetRecord) {
+          return [];
+        }
+        return [
+          {
+            line: Number(snippetRecord.line ?? 0),
+            text: String(snippetRecord.text ?? "")
+          }
+        ];
+      })
+    : [];
+}
+
+function mergeRuleReadResult(rules: RuleSearchResult[], readRule: RuleSearchResult): RuleSearchResult[] {
+  const existingIndex = rules.findIndex((rule) => rule.path === readRule.path);
+  if (existingIndex === -1) {
+    return [...rules, readRule];
+  }
+
+  return rules.map((rule, index) =>
+    index === existingIndex
+      ? {
+          ...rule,
+          ...readRule,
+          score: rule.score || readRule.score,
+          snippets: rule.snippets.length > 0 ? rule.snippets : readRule.snippets
+        }
+      : rule
+  );
+}
+
+function normalizeValidation(value: unknown) {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  return {
+    ok: Boolean(record.ok),
+    reason: record.reason === null || record.reason === undefined ? null : String(record.reason),
+    normalized_sql:
+      record.normalized_sql === null || record.normalized_sql === undefined ? null : String(record.normalized_sql),
+    limited_sql: record.limited_sql === null || record.limited_sql === undefined ? null : String(record.limited_sql)
+  };
+}
+
+function normalizeQueryResult(value: unknown): QueryResult | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  const columns = Array.isArray(record.columns) ? record.columns.map(String) : [];
+  const rows: Array<Record<string, unknown>> = Array.isArray(record.rows)
+    ? record.rows.flatMap((row) => {
+        const rowRecord = asRecord(row);
+        return rowRecord ? [rowRecord] : [];
+      })
+    : [];
+  return {
+    columns,
+    rows,
+    row_count: Number(record.row_count ?? rows.length),
+    limited_sql: String(record.limited_sql ?? "")
+  };
+}
+
 function emptyConfigForm(): ConfigForm {
   return {
     app_timezone: "Asia/Shanghai",
@@ -1658,7 +1903,8 @@ function emptyConfigForm(): ConfigForm {
     db_user: "",
     db_password: "",
     db_sslmode: "",
-    pg_schemas: ""
+    pg_schemas: "",
+    agent_verbose_debug: false
   };
 }
 
@@ -1679,7 +1925,8 @@ function configToForm(config: RuntimeConfigResponse): ConfigForm {
     db_user: config.database.username ?? "",
     db_password: "",
     db_sslmode: config.database.sslmode ?? "",
-    pg_schemas: config.pg_schemas.join(", ")
+    pg_schemas: config.pg_schemas.join(", "),
+    agent_verbose_debug: config.agent_verbose_debug
   };
 }
 
@@ -1707,6 +1954,7 @@ function formToPayload(form: ConfigForm): RuntimeConfigUpdate {
   }
 
   payload.pg_schemas = parseSchemaNames(form.pg_schemas);
+  payload.agent_verbose_debug = form.agent_verbose_debug;
 
   const llmProvider = form.llm_provider.trim();
   if (llmProvider) {
@@ -1801,11 +2049,26 @@ function metadataValue(item: Record<string, unknown>, key: string) {
   return String(value);
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return null;
+}
+
 function formatOptionalNumber(value: number | null | undefined) {
   if (value === null || value === undefined) {
     return "-";
   }
   return formatNumber(value);
+}
+
+function optionalRecordNumber(value: unknown): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function resizePanePair(
@@ -1847,6 +2110,14 @@ function formatUsage(usage: TokenUsage, text: CopyText) {
     return `${text.total}: 0`;
   }
   return `${text.total}: ${formatNumber(usage.total_tokens)}`;
+}
+
+function formatRuleHit(rule: RuleSearchResult) {
+  const snippet = rule.snippets[0];
+  if (!snippet) {
+    return rule.path;
+  }
+  return `${rule.path} L${snippet.line}: ${snippet.text}`;
 }
 
 function formatNumber(value: number) {

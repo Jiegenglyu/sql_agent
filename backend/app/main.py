@@ -1,5 +1,11 @@
+import json
+from queue import Queue
+from threading import Thread
+from typing import Any, Iterator
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from backend.app.config import get_settings
@@ -56,6 +62,7 @@ def health() -> HealthResponse:
         llm_model=settings.llm_model,
         app_timezone=settings.app_timezone,
         business_rules_dir=str(settings.business_rules_dir),
+        agent_verbose_debug=settings.agent_verbose_debug,
         token_usage=get_total_token_usage(),
     )
 
@@ -149,3 +156,52 @@ def api_sql_execute(request: SqlExecuteRequest) -> SqlExecuteResponse:
 @app.post(f"{api_prefix}/agent/query", response_model=AgentQueryResponse)
 def api_agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
     return run_agent_query(request)
+
+
+@app.post(f"{api_prefix}/agent/query/stream")
+def api_agent_query_stream(request: AgentQueryRequest) -> StreamingResponse:
+    return StreamingResponse(
+        _agent_query_event_stream(request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _agent_query_event_stream(request: AgentQueryRequest) -> Iterator[str]:
+    events: Queue[dict[str, Any] | None] = Queue()
+
+    def on_trace(step) -> None:
+        events.put(
+            {
+                "type": "trace",
+                "step": step.model_dump(mode="json"),
+            }
+        )
+
+    def run_query() -> None:
+        try:
+            response = run_agent_query(request, on_trace=on_trace)
+            events.put(
+                {
+                    "type": "final",
+                    "response": response.model_dump(mode="json", by_alias=True),
+                }
+            )
+        except Exception as exc:
+            events.put({"type": "error", "message": str(exc)})
+        finally:
+            events.put(None)
+
+    Thread(target=run_query, daemon=True).start()
+
+    while True:
+        event = events.get()
+        if event is None:
+            break
+
+        event_type = str(event.get("type") or "message")
+        data = {key: value for key, value in event.items() if key != "type"}
+        yield f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

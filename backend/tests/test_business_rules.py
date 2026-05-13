@@ -37,6 +37,47 @@ class BusinessRuleSearchTests(unittest.TestCase):
             self.assertEqual(rule["path"], "billing.md")
             self.assertIn("invoice", rule["content"])
 
+    def test_search_selects_file_then_reads_matching_rule_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "aiinfra.md").write_text(
+                "\n".join(
+                    [
+                        "# AI Infra",
+                        "",
+                        "## Card-Hours",
+                        "- 中文口径：卡时使用率 = 已分配卡时 / 总卡时。",
+                        "- SQL 字段：allocated_gpu_hours 和 idle_gpu_hours。",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (base / "finance.md").write_text(
+                "\n".join(
+                    [
+                        "# Finance",
+                        "",
+                        "## Collection",
+                        "- 中文口径：回款金额只统计 paid invoice。",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            results = search_rules("最新一天各集群的卡时使用率是多少", base_dir=base, limit=5, max_file_bytes=1000)
+            hit_line = results[0]["snippets"][0]["line"]
+            rule = read_rule(
+                results[0]["path"],
+                base_dir=base,
+                start_line=hit_line,
+                end_line=hit_line + 1,
+                max_file_bytes=1000,
+            )
+
+            self.assertEqual(results[0]["path"], "aiinfra.md")
+            self.assertIn("卡时使用率", rule["content"])
+            self.assertNotIn("回款金额", rule["content"])
+
     def test_searches_chinese_terms_with_ngrams(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

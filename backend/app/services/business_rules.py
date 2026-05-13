@@ -13,6 +13,8 @@ ALLOWED_EXTENSIONS = {".md", ".txt", ".yaml", ".yml", ".json"}
 MAX_QUERY_LENGTH = 500
 DEFAULT_MAX_FILE_BYTES = 256_000
 DEFAULT_MAX_RESULTS = 8
+DEFAULT_READ_CONTEXT_LINES = 24
+MAX_READ_LINES = 200
 
 
 def search_rules(
@@ -56,6 +58,8 @@ def read_rule(
     *,
     base_dir: Path | None = None,
     max_file_bytes: int | None = None,
+    start_line: int | None = None,
+    end_line: int | None = None,
 ) -> dict[str, Any]:
     base = _rules_base(base_dir)
     max_bytes = max_file_bytes or _default_max_file_bytes()
@@ -64,9 +68,22 @@ def read_rule(
         raise BusinessRuleError("Rule file extension is not allowed.")
     if path.stat().st_size > max_bytes:
         raise BusinessRuleError("Rule file exceeds the maximum allowed size.")
+    content = path.read_text(encoding="utf-8", errors="replace")
+    lines = content.splitlines()
+    selected_start, selected_end, truncated = _resolve_line_range(
+        len(lines),
+        start_line=start_line,
+        end_line=end_line,
+    )
+    selected_lines = lines[selected_start - 1 : selected_end] if selected_start else []
     return {
         "path": path.relative_to(base).as_posix(),
-        "content": path.read_text(encoding="utf-8", errors="replace"),
+        "content": "\n".join(selected_lines) if selected_lines else "",
+        "start_line": selected_start,
+        "end_line": selected_end,
+        "line_count": len(lines),
+        "truncated": truncated,
+        "snippets": _line_snippets(selected_lines, selected_start),
     }
 
 
@@ -117,6 +134,57 @@ def _safe_rule_path(base: Path, relative_path: str) -> Path:
     if not path.is_file():
         raise BusinessRuleError("Rule file was not found.")
     return path
+
+
+def _resolve_line_range(
+    line_count: int,
+    *,
+    start_line: int | None,
+    end_line: int | None,
+) -> tuple[int, int, bool]:
+    if line_count == 0:
+        return 0, 0, False
+
+    if start_line is None and end_line is None:
+        return 1, line_count, False
+    if start_line is not None and start_line < 1:
+        raise BusinessRuleError("Rule start_line must be greater than zero.")
+    if end_line is not None and end_line < 1:
+        raise BusinessRuleError("Rule end_line must be greater than zero.")
+
+    start = start_line or 1
+    if start > line_count:
+        raise BusinessRuleError("Rule start_line exceeds the file length.")
+
+    end = end_line or min(line_count, start + DEFAULT_READ_CONTEXT_LINES - 1)
+    end = min(end, line_count)
+    if end < start:
+        raise BusinessRuleError("Rule end_line must be greater than or equal to start_line.")
+
+    truncated = False
+    if end - start + 1 > MAX_READ_LINES:
+        end = start + MAX_READ_LINES - 1
+        truncated = True
+    return start, end, truncated
+
+
+def _line_snippets(lines: list[str], start_line: int, *, limit: int = 5) -> list[dict[str, Any]]:
+    snippets: list[dict[str, Any]] = []
+    if start_line == 0:
+        return snippets
+    for offset, line in enumerate(lines):
+        text = line.strip()
+        if not text:
+            continue
+        snippets.append(
+            {
+                "line": start_line + offset,
+                "text": text[:500],
+            }
+        )
+        if len(snippets) >= limit:
+            break
+    return snippets
 
 
 def _iter_rule_files(base: Path, *, max_bytes: int | None = None) -> list[Path]:

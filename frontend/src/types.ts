@@ -14,6 +14,15 @@ export interface RuleSearchResult {
     line: number;
     text: string;
   }>;
+  read_snippets?: Array<{
+    line: number;
+    text: string;
+  }>;
+  content?: string;
+  read_start_line?: number | null;
+  read_end_line?: number | null;
+  line_count?: number | null;
+  read_truncated?: boolean;
 }
 
 export interface SqlValidation {
@@ -71,6 +80,7 @@ export interface HealthResponse {
   llm_model: string | null;
   app_timezone: string;
   business_rules_dir: string;
+  agent_verbose_debug: boolean;
   token_usage: TokenUsage;
 }
 
@@ -106,6 +116,7 @@ export interface RuntimeConfigResponse {
   pg_statement_timeout_ms: number;
   pg_schema_limit: number;
   pg_schemas: string[];
+  agent_verbose_debug: boolean;
   database: DatabaseRuntimeConfig;
   llm: LlmRuntimeConfig;
 }
@@ -123,6 +134,7 @@ export interface RuntimeConfigUpdate {
   pg_statement_timeout_ms?: number;
   pg_schema_limit?: number;
   pg_schemas?: string[];
+  agent_verbose_debug?: boolean;
   llm_provider?: string;
   llm_base_url?: string;
   llm_model?: string;

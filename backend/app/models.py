@@ -95,6 +95,7 @@ class HealthResponse(BaseModel):
     llm_model: str | None = None
     app_timezone: str
     business_rules_dir: str
+    agent_verbose_debug: bool = False
     token_usage: "TokenUsage" = Field(default_factory=lambda: TokenUsage())
 
 
@@ -130,6 +131,7 @@ class RuntimeConfigResponse(BaseModel):
     pg_statement_timeout_ms: int
     pg_schema_limit: int
     pg_schemas: list[str] = Field(default_factory=list)
+    agent_verbose_debug: bool = False
     database: DatabaseRuntimeConfig
     llm: LlmRuntimeConfig
 
@@ -147,6 +149,7 @@ class RuntimeConfigUpdate(BaseModel):
     pg_statement_timeout_ms: int | None = Field(default=None, ge=100, le=120000)
     pg_schema_limit: int | None = Field(default=None, ge=1, le=500)
     pg_schemas: list[str] | None = Field(default=None, max_length=50)
+    agent_verbose_debug: bool | None = None
 
     llm_provider: str | None = Field(default=None, max_length=100)
     llm_base_url: str | None = Field(default=None, max_length=500)

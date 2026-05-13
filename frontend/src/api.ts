@@ -7,6 +7,7 @@ import type {
   RuntimeConfigUpdate,
   SchemaMetadataResponse,
   SqlValidation,
+  TraceStep,
   UiLanguage
 } from "./types";
 
@@ -74,6 +75,100 @@ export function queryAgent(question: string, language: UiLanguage): Promise<Agen
     method: "POST",
     body: JSON.stringify({ question, execute: true, language })
   });
+}
+
+export interface AgentStreamHandlers {
+  onTrace?: (step: TraceStep) => void;
+  onFinal?: (response: AgentResponse) => void;
+  onError?: (message: string) => void;
+}
+
+export async function queryAgentStream(
+  question: string,
+  language: UiLanguage,
+  handlers: AgentStreamHandlers = {}
+): Promise<AgentResponse> {
+  const response = await fetch(`${API_BASE}${apiPath("/agent/query/stream")}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream"
+    },
+    body: JSON.stringify({ question, execute: true, language })
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || response.statusText);
+  }
+  if (!response.body) {
+    const fallback = await queryAgent(question, language);
+    handlers.onFinal?.(fallback);
+    return fallback;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse: AgentResponse | null = null;
+  let streamError: string | null = null;
+
+  function handleBlock(rawBlock: string) {
+    const block = rawBlock.trim();
+    if (!block) {
+      return;
+    }
+
+    let eventType = "message";
+    const dataLines: string[] = [];
+    block.split("\n").forEach((line) => {
+      if (line.startsWith("event:")) {
+        eventType = line.slice("event:".length).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice("data:".length).trimStart());
+      }
+    });
+
+    const data = dataLines.length > 0 ? JSON.parse(dataLines.join("\n")) : {};
+    if (eventType === "trace" && data.step) {
+      handlers.onTrace?.(data.step as TraceStep);
+    } else if (eventType === "final" && data.response) {
+      finalResponse = data.response as AgentResponse;
+      handlers.onFinal?.(finalResponse);
+    } else if (eventType === "error") {
+      streamError = String(data.message || "Agent stream failed.");
+      handlers.onError?.(streamError);
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done });
+      let separatorIndex = buffer.indexOf("\n\n");
+      while (separatorIndex >= 0) {
+        handleBlock(buffer.slice(0, separatorIndex));
+        buffer = buffer.slice(separatorIndex + 2);
+        separatorIndex = buffer.indexOf("\n\n");
+      }
+    }
+    if (done) {
+      break;
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    handleBlock(buffer);
+  }
+
+  if (streamError) {
+    throw new Error(streamError);
+  }
+  if (!finalResponse) {
+    throw new Error("Agent stream ended without a final response.");
+  }
+  return finalResponse;
 }
 
 export function getSchemaMetadata(limit?: number, schemas?: string[]): Promise<SchemaMetadataResponse> {
