@@ -161,7 +161,8 @@ def _build_prompt(
             "",
             "Constraints:",
             "- Use PostgreSQL syntax.",
-            "- Use only tables and columns visible in the schema.",
+            "- Use only tables and columns visible in the selected schema metadata.",
+            "- Treat fixed business-rule logic as mandatory for every selected table.",
             "- Generate a single read-only SELECT or WITH query.",
             "- Include a LIMIT when the request does not imply aggregation.",
         ]

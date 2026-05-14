@@ -1,5 +1,6 @@
 from backend.app.mcp.server import (
     current_date_context,
+    business_rule_resolve,
     mcp,
     pg_describe_table,
     pg_list_schemas,
@@ -13,6 +14,7 @@ from backend.app.mcp.server import (
 __all__ = [
     "mcp",
     "current_date_context",
+    "business_rule_resolve",
     "pg_describe_table",
     "pg_list_schemas",
     "pg_list_tables",

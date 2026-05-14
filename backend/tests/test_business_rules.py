@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.app.services.business_rules import BusinessRuleError, read_rule, search_rules
+from backend.app.services.business_rules import BusinessRuleError, read_rule, resolve_business_rules, search_rules
 
 
 class BusinessRuleSearchTests(unittest.TestCase):
@@ -87,6 +87,107 @@ class BusinessRuleSearchTests(unittest.TestCase):
 
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0]["path"], "aiinfra.md")
+
+    def test_resolve_returns_fixed_logic_and_only_matched_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "daily_gpu_metrics.md").write_text(
+                "\n".join(
+                    [
+                        "# daily_gpu_metrics",
+                        "schema: usage",
+                        "table: daily_gpu_metrics",
+                        "aliases: 卡时, 成本",
+                        "related_tables: usage.teams",
+                        "",
+                        "### 固定查询逻辑 ###",
+                        "- 默认使用最新 metric_date。",
+                        "- 比率计算必须避免除以零。",
+                        "",
+                        "### 业务逻辑 ###",
+                        "## 卡时使用率",
+                        "keywords: 卡时使用率, 使用率",
+                        "- 卡时使用率 = allocated / total。",
+                        "",
+                        "## 单卡时成本",
+                        "keywords: 单卡时成本, 成本",
+                        "- 单卡时成本 = cost_usd / allocated_gpu_hours。",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (base / "gpu_nodes.md").write_text(
+                "\n".join(
+                    [
+                        "# gpu_nodes",
+                        "schema: usage",
+                        "table: gpu_nodes",
+                        "",
+                        "### 固定查询逻辑 ###",
+                        "- active 表示可用。",
+                        "",
+                        "### 业务逻辑 ###",
+                        "## 总卡数",
+                        "keywords: 总卡数",
+                        "- 总卡数 = SUM(gpu_count)。",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            resolved = resolve_business_rules("上周每个团队的单卡时成本是多少？", base_dir=base)
+
+            self.assertFalse(resolved["clarification_required"])
+            self.assertEqual(resolved["candidates"][0]["path"], "daily_gpu_metrics.md")
+            self.assertIn("默认使用最新", resolved["candidates"][0]["fixed_logic"])
+            self.assertEqual(resolved["candidates"][0]["matched_sections"][0]["title"], "单卡时成本")
+            self.assertNotIn("卡时使用率", resolved["candidates"][0]["matched_sections"][0]["content"])
+            selected_tables = {(item["schema"], item["table"]) for item in resolved["selected_tables"]}
+            self.assertIn(("usage", "daily_gpu_metrics"), selected_tables)
+            self.assertIn(("usage", "teams"), selected_tables)
+
+    def test_resolve_asks_clarification_for_generic_usage_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "daily_gpu_metrics.md").write_text(
+                "\n".join(
+                    [
+                        "# daily_gpu_metrics",
+                        "schema: usage",
+                        "table: daily_gpu_metrics",
+                        "",
+                        "### 固定查询逻辑 ###",
+                        "- 默认使用最新 metric_date。",
+                        "",
+                        "### 业务逻辑 ###",
+                        "## 卡时使用率",
+                        "keywords: 使用情况, 卡时使用率",
+                        "- 卡时使用率 = allocated / total。",
+                        "",
+                        "## GPU/NPU 核心利用率",
+                        "keywords: 使用情况, 核心利用率",
+                        "- 核心利用率 = avg_gpu_utilization_pct。",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            resolved = resolve_business_rules("查一下使用情况", base_dir=base)
+
+            self.assertTrue(resolved["clarification_required"])
+            labels = [option["label"] for option in resolved["options"]]
+            self.assertIn("卡时使用率", labels)
+            self.assertIn("GPU/NPU 核心利用率", labels)
+
+    def test_resolve_reports_no_structured_rules_without_loading_legacy_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "legacy.md").write_text("卡时使用率 = 已分配卡时 / 总卡时。", encoding="utf-8")
+
+            resolved = resolve_business_rules("卡时使用率", base_dir=base)
+
+            self.assertEqual(resolved["reason"], "no_structured_rules")
+            self.assertEqual(resolved["candidates"], [])
 
 
 if __name__ == "__main__":

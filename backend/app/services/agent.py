@@ -50,6 +50,25 @@ AGENT_TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "business_rule_resolve",
+            "description": (
+                "Resolve which table-scoped business rule files apply to the user question, "
+                "including mandatory fixed logic, matched business logic sections, selected tables, "
+                "confidence, and whether clarification is required."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "business_rule_search",
             "description": "Search business metric definitions and calculation rules across the configured rule directory.",
             "parameters": {
@@ -104,7 +123,10 @@ AGENT_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "pg_schema_overview",
-            "description": "Return a compact overview of PostgreSQL tables and columns in the configured schema scope.",
+            "description": (
+                "Return a compact overview of PostgreSQL tables and columns in the configured schema scope. "
+                "Use only as a legacy fallback when structured business-rule routing cannot select tables."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -208,6 +230,13 @@ def run_agent_query(request: AgentQueryRequest, on_trace: TraceCallback | None =
 def _run_tool_calling_agent(request: AgentQueryRequest, trace: list[TraceStep]) -> AgentQueryResponse:
     language = _resolve_language(request)
     max_rows = request.max_rows or 200
+    prepared = _prepare_query_context(request, trace, language=language)
+    if prepared.get("clarification_response"):
+        return prepared["clarification_response"]
+
+    date_context = prepared["date_context"]
+    rules = prepared["rules"]
+    schema = prepared["schema"]
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _system_prompt(language)},
         {
@@ -216,15 +245,19 @@ def _run_tool_calling_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
                 f"Question: {request.question}\n"
                 f"Language: {language}\n"
                 f"Max rows: {max_rows}\n"
-                "Use MCP tools to inspect date context, search and read business rules, schema, validate SQL, "
-                "and query PostgreSQL. Final answer should summarize the readonly query result."
+                "Resolved date context:\n"
+                f"{_json_text(date_context)}\n"
+                "Selected business rules:\n"
+                f"{_json_text(rules)}\n"
+                "Selected PostgreSQL table metadata:\n"
+                f"{_json_text(schema or {})}\n"
+                "Use only the selected table metadata unless you must ask for clarification. "
+                "Validate SQL and query PostgreSQL through MCP tools. "
+                "Final answer should summarize the readonly query result."
             ),
         },
     ]
 
-    date_context: dict[str, Any] = {}
-    rules: list[dict[str, Any]] = []
-    schema: dict[str, Any] | None = None
     validation: dict[str, Any] = dict(DEFAULT_VALIDATION)
     result: dict[str, Any] | None = None
     sql = ""
@@ -295,6 +328,8 @@ def _run_tool_calling_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
 
             if name == "current_date_context" and isinstance(output, dict):
                 date_context = output
+            elif name == "business_rule_resolve" and isinstance(output, dict):
+                rules = _rules_from_resolve(output)
             elif name == "business_rule_read" and isinstance(output, dict):
                 rules = _merge_rule_read_result(rules, output)
             elif name == "pg_schema_overview" and isinstance(output, dict):
@@ -347,13 +382,12 @@ def _run_orchestrated_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
     language = _resolve_language(request)
     max_rows = request.max_rows or 200
 
-    date_context = _safe_tool_call(trace, "current_date_context", {}) or {}
-    rules = _safe_tool_call(trace, "business_rule_search", {"query": request.question, "limit": 8}) or []
-    if isinstance(rules, list):
-        rules = _read_relevant_business_rules(trace, rules)
-    schema = _safe_tool_call(trace, "pg_schema_overview", {"limit": 80})
-    if not isinstance(schema, dict):
-        schema = None
+    prepared = _prepare_query_context(request, trace, language=language)
+    if prepared.get("clarification_response"):
+        return prepared["clarification_response"]
+    date_context = prepared["date_context"]
+    rules = prepared["rules"]
+    schema = prepared["schema"]
 
     sql = _extract_sql(request.question)
     if sql:
@@ -461,6 +495,201 @@ def _generate_sql(
         {"mode": "manual"},
     )
     return "SELECT 1 AS agent_ready"
+
+
+def _prepare_query_context(
+    request: AgentQueryRequest,
+    trace: list[TraceStep],
+    *,
+    language: str,
+) -> dict[str, Any]:
+    date_context = _safe_tool_call(trace, "current_date_context", {}) or {}
+    if not isinstance(date_context, dict):
+        date_context = {}
+
+    resolve_result = _safe_tool_call(
+        trace,
+        "business_rule_resolve",
+        {"query": request.question, "limit": 3},
+    )
+    if not isinstance(resolve_result, dict):
+        resolve_result = {}
+
+    if resolve_result.get("clarification_required"):
+        answer = _clarification_answer(resolve_result, language=language)
+        _append_trace(
+            trace,
+            "clarification",
+            "warning",
+            "Question is ambiguous; asking the user to choose a business meaning before querying.",
+            {"resolve": _preview(resolve_result)},
+        )
+        return {
+            "date_context": date_context,
+            "rules": _rules_from_resolve(resolve_result),
+            "schema": None,
+            "clarification_response": AgentQueryResponse(
+                question=request.question,
+                answer=answer,
+                sql="",
+                executed=False,
+                trace=trace,
+                rules=_rules_from_resolve(resolve_result),
+                db_schema=None,
+                validation=dict(DEFAULT_VALIDATION),
+                result=None,
+            ),
+        }
+
+    if resolve_result.get("reason") == "no_structured_rules":
+        return _legacy_query_context(request, trace, date_context)
+
+    rules = _rules_from_resolve(resolve_result)
+    schema = _schema_for_selected_tables(trace, resolve_result)
+    if not schema and not rules:
+        return _legacy_query_context(request, trace, date_context)
+
+    return {
+        "date_context": date_context,
+        "rules": rules,
+        "schema": schema,
+        "clarification_response": None,
+    }
+
+
+def _legacy_query_context(
+    request: AgentQueryRequest,
+    trace: list[TraceStep],
+    date_context: dict[str, Any],
+) -> dict[str, Any]:
+    rules = _safe_tool_call(trace, "business_rule_search", {"query": request.question, "limit": 8}) or []
+    if isinstance(rules, list):
+        rules = _read_relevant_business_rules(trace, rules)
+    schema = _safe_tool_call(trace, "pg_schema_overview", {"limit": 80})
+    if not isinstance(schema, dict):
+        schema = None
+    return {
+        "date_context": date_context,
+        "rules": rules if isinstance(rules, list) else [],
+        "schema": schema,
+        "clarification_response": None,
+    }
+
+
+def _rules_from_resolve(resolve_result: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = resolve_result.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        rule = dict(candidate)
+        if rule.get("fixed_logic"):
+            fixed_content = str(rule.get("fixed_logic") or "").strip()
+            matched_content = _matched_sections_text(rule)
+            rule["content"] = "\n\n".join(
+                item
+                for item in [
+                    "### 固定查询逻辑 ###\n" + fixed_content if fixed_content else "",
+                    "### 命中业务逻辑 ###\n" + matched_content if matched_content else "",
+                ]
+                if item
+            )
+        rules.append(rule)
+    return rules
+
+
+def _matched_sections_text(rule: dict[str, Any]) -> str:
+    sections = rule.get("matched_sections")
+    if not isinstance(sections, list):
+        return ""
+    chunks: list[str] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or "业务逻辑").strip()
+        content = str(section.get("content") or "").strip()
+        if title or content:
+            chunks.append(f"## {title}\n{content}".strip())
+    return "\n\n".join(chunks)
+
+
+def _schema_for_selected_tables(trace: list[TraceStep], resolve_result: dict[str, Any]) -> dict[str, Any] | None:
+    selected = resolve_result.get("selected_tables")
+    if not isinstance(selected, list) or not selected:
+        return None
+
+    tables: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        table = str(item.get("table") or "").strip()
+        schema = _resolve_selected_schema(item)
+        if not table or not schema:
+            continue
+        key = (schema, table)
+        if key in seen:
+            continue
+        seen.add(key)
+        metadata = _safe_tool_call(trace, "pg_describe_table", {"schema": schema, "table": table})
+        if isinstance(metadata, dict):
+            metadata["selection_role"] = item.get("role")
+            metadata["selection_reason"] = item.get("reason")
+            metadata["business_rule_path"] = item.get("source_path")
+            tables.append(metadata)
+
+    if not tables:
+        return None
+    schemas = sorted({str(item.get("schema")) for item in tables if item.get("schema")})
+    return {
+        "tables": tables,
+        "table_count": len(tables),
+        "failed_count": sum(1 for item in tables if item.get("error")),
+        "schemas": schemas,
+        "selected_by": "business_rule_resolve",
+    }
+
+
+def _resolve_selected_schema(item: dict[str, Any]) -> str | None:
+    schema = item.get("schema")
+    if schema:
+        return str(schema)
+    try:
+        from backend.app.config import get_settings
+
+        schemas = get_settings().pg_schemas
+        if len(schemas) == 1:
+            return schemas[0]
+    except Exception:
+        return None
+    return None
+
+
+def _clarification_answer(resolve_result: dict[str, Any], *, language: str) -> str:
+    options = resolve_result.get("options")
+    if not isinstance(options, list):
+        options = []
+    if language == "en":
+        if not options:
+            return (
+                "I do not have enough business context to choose the right table or metric yet. "
+                "Please specify the metric, business object, time range, or grouping dimension."
+            )
+        lines = ["I need one clarification before querying. I understood the request as possibly referring to:"]
+        for index, option in enumerate(options, start=1):
+            lines.append(f"{index}. {option.get('label')}: {option.get('table')}")
+        lines.append("Which one do you want to query?")
+        return "\n".join(lines)
+
+    if not options:
+        return "我还不能确定要查哪张表或哪个指标。请补充具体指标、业务对象、时间范围或分组维度。"
+    lines = ["我需要先澄清一下。我理解这个问题可能指以下几类："]
+    for index, option in enumerate(options, start=1):
+        lines.append(f"{index}. {option.get('label')}：{option.get('table')}")
+    lines.append("你想看哪一种？")
+    return "\n".join(lines)
 
 
 def _read_relevant_business_rules(
@@ -578,6 +807,7 @@ def _mcp_tool_registry() -> dict[str, Callable[..., Any]]:
 
     return {
         "current_date_context": server.current_date_context,
+        "business_rule_resolve": server.business_rule_resolve,
         "business_rule_list": server.business_rule_list,
         "business_rule_search": server.business_rule_search,
         "business_rule_read": server.business_rule_read,
@@ -593,10 +823,11 @@ def _system_prompt(language: str) -> str:
     return (
         "You are a readonly business data Agent for PostgreSQL. "
         "You must use the MCP tools before answering data questions. "
-        "For relative dates such as today, yesterday, this week, or latest day, call current_date_context first. "
-        "Use business_rule_search to find metric definitions, then use business_rule_read to inspect the relevant file or line range before writing SQL. "
-        "Use business_rule_list only when the search result is ambiguous or missing likely files. "
-        "Inspect pg_schema_overview before writing SQL. "
+        "The user message may already include resolved date context, selected table metadata, and selected business rules. "
+        "Use business_rule_resolve when you need to re-check whether the question is ambiguous. "
+        "If business_rule_resolve says clarification_required, ask the clarification question and do not write SQL. "
+        "Use selected table metadata only; do not call pg_schema_overview unless no structured business rules exist. "
+        "Treat fixed business-rule logic as mandatory SQL constraints. "
         "Validate SQL with pg_validate_sql before pg_query. "
         "Only query through pg_query; it enforces a readonly SELECT/WITH policy. "
         f"Answer in {language_instruction}, concisely, and never invent data."
@@ -638,6 +869,18 @@ def _tool_summary(name: str, output: Any) -> str:
         return f"Resolved today as {output.get('today')} in {output.get('timezone')}."
     if name == "business_rule_list" and isinstance(output, list):
         return f"Listed {len(output)} business rule file(s)."
+    if name == "business_rule_resolve" and isinstance(output, dict):
+        if output.get("clarification_required"):
+            return (
+                "Business rule routing needs clarification "
+                f"(confidence {output.get('confidence')}, {output.get('candidate_count', 0)} candidate(s))."
+            )
+        selected = output.get("selected_tables")
+        selected_count = len(selected) if isinstance(selected, list) else 0
+        return (
+            f"Resolved {selected_count} selected table(s) from business rules "
+            f"(confidence {output.get('confidence')})."
+        )
     if name == "business_rule_search" and isinstance(output, list):
         return _business_rule_summary(output)
     if name == "business_rule_read" and isinstance(output, dict):

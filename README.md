@@ -10,12 +10,23 @@ Traceable bilingual business data Agent for PostgreSQL. Users can ask questions 
 
 `sql_agent` is built for business data workflows where users query databases with natural language. It makes the LLM-to-SQL path auditable by adding read-only validation, business rule retrieval, schema inspection, and execution tracing around generated SQL.
 
+## 功能特性 / Features
+
+- 结构化业务规则路由：支持按表维护规则文件，自动携带固定查询逻辑，并只注入命中的业务逻辑段。
+- Structured business-rule routing: maintain one rule file per table, always include fixed query logic, and inject only matched business logic sections.
+- 歧义澄清：当问题命中低置信度或多个业务含义时，Agent 会先追问澄清，不直接生成 SQL。
+- Ambiguity clarification: when confidence is low or multiple business meanings match, the Agent asks a clarification question before writing SQL.
+- 精准 Schema 读取：规则解析出候选表后，只调用所选表的元数据；缺少结构化规则时才回退到完整 Schema 概览。
+- Targeted schema loading: after rule resolution selects tables, the Agent loads only selected table metadata and falls back to full schema overview only when structured rules are unavailable.
+- AI infra 演示规则：内置 GPU 卡时使用率、核心利用率、单卡时成本、总卡数和容量告警等示例规则。
+- AI infra demo rules: bundled examples cover GPU-hour utilization, core utilization, per-GPU-hour cost, total GPU count, and capacity alerts.
+
 ## 架构 / Architecture
 
 - 后端 API / Backend API: FastAPI service in `backend/app/main.py`.
 - MCP 工具 / MCP tools: PostgreSQL and business rule tools in `backend/app/mcp/server.py`.
 - PostgreSQL 访问 / PostgreSQL access: read-only SQL guard plus PostgreSQL read-only transaction execution.
-- 业务规则 / Business rules: local folder list/search/read limited to `backend/business_rules`.
+- 业务规则 / Business rules: local folder resolve/list/search/read limited to `backend/business_rules`.
 - 前端 / Frontend: Vite React business query console in `frontend`, with Chinese and English UI switching.
 
 ## 安全边界 / Security Boundaries

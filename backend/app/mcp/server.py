@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from backend.app.config import get_settings
-from backend.app.services.business_rules import list_rule_files, read_rule, search_rules
+from backend.app.services.business_rules import list_rule_files, read_rule, resolve_business_rules, search_rules
 from backend.app.services.postgres import describe_table, execute_select, list_schemas, list_tables, schema_overview
 from backend.app.services.sql_guard import validate_select_sql
 
@@ -83,6 +83,12 @@ def pg_query(sql: str, max_rows: int = 200) -> dict[str, Any]:
 def business_rule_search(query: str, limit: int = 8) -> list[dict[str, Any]]:
     """Search only within the configured business rules directory."""
     return search_rules(query, limit=limit)
+
+
+@mcp.tool()
+def business_rule_resolve(query: str, limit: int = 3) -> dict[str, Any]:
+    """Resolve table-scoped business rules and whether the user question needs clarification."""
+    return resolve_business_rules(query, limit=limit)
 
 
 @mcp.tool()
