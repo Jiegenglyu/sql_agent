@@ -24,7 +24,8 @@ Traceable bilingual business data Agent for PostgreSQL. Users can ask questions 
 ## 架构 / Architecture
 
 - 后端 API / Backend API: FastAPI service in `backend/app/main.py`.
-- MCP 工具 / MCP tools: PostgreSQL and business rule tools in `backend/app/mcp/server.py`.
+- 南向 MCP 工具 / Southbound MCP tools: internal PostgreSQL and business rule tools in `backend/app/mcp/server.py`.
+- 北向 MCP 接口 / Northbound MCP interface: public question-answer tool in `backend/app/mcp/public_server.py`.
 - PostgreSQL 访问 / PostgreSQL access: read-only SQL guard plus PostgreSQL read-only transaction execution.
 - 业务规则 / Business rules: local folder resolve/list/search/read limited to `backend/business_rules`.
 - 前端 / Frontend: Vite React business query console in `frontend`, with Chinese and English UI switching.
@@ -95,13 +96,163 @@ Start the frontend.
 make frontend
 ```
 
-启动 MCP server。
+启动内部南向 MCP server。
 
-Start the MCP server.
+Start the internal southbound MCP server.
 
 ```bash
 make mcp
 # or: uv run python -m backend.app.mcp.server
+```
+
+启动北向 MCP server。这个服务只暴露面向外部 Agent 的公开能力，不会向外部 MCP client 注册 `pg_query`、`pg_describe_table`、`business_rule_read` 等数据库和规则工具。
+
+Start the northbound MCP server. This server exposes only public Agent-facing capabilities; it does not register `pg_query`, `pg_describe_table`, `business_rule_read`, or other database/rule tools to external MCP clients.
+
+```bash
+make public-mcp
+# streamable HTTP endpoint: http://127.0.0.1:8001/mcp
+```
+
+北向 MCP 暴露两个工具和一个 resource：
+
+The northbound MCP exposes two tools and one resource:
+
+- `ask_agent`: 提问并返回公开答案，不返回 SQL、表结构、执行 trace 或原始明细行。
+- `describe_capabilities`: 根据当前业务规则返回“能查什么”的公开摘要；如果配置了 LLM，会优先使用 LLM 压缩总结，失败时回退到本地规则摘要。
+- `capabilities://sql-agent`: 同一份能力摘要的 MCP resource，方便外部 agent 在选择工具前读取。
+
+如果 MCP client 使用 stdio 配置，使用 `mcp.public.json`。`mcp.json` 是内部南向工具配置，不要作为外部用户入口。
+
+For stdio MCP clients, use `mcp.public.json`. `mcp.json` is the internal southbound tools config and should not be used as the external user entrypoint.
+
+### 外部 Agent 接入 / External Agent MCP Clients
+
+先启动北向 MCP 服务。默认只监听本机 `127.0.0.1`，未启用鉴权；不要直接暴露到公网。
+
+Start the northbound MCP server first. It binds to local `127.0.0.1` by default and has no authentication; do not expose it directly to the public internet.
+
+```bash
+make public-mcp
+```
+
+#### Claude Code
+
+Claude Code 推荐使用 HTTP MCP：
+
+Claude Code should use HTTP MCP:
+
+```bash
+claude mcp add \
+  --transport http \
+  --scope user \
+  sql_agent \
+  http://127.0.0.1:8001/mcp
+
+claude mcp list
+claude mcp get sql_agent
+```
+
+在 Claude Code 里使用 `/mcp` 检查连接。新加 MCP 后，如果当前会话没有看到新工具，退出并重新进入 `claude`。
+
+Inside Claude Code, use `/mcp` to inspect the connection. If a running session does not see newly added tools, exit and start `claude` again.
+
+示例提示：
+
+Example prompts:
+
+```text
+调用 sql_agent 的 describe_capabilities，language=zh
+调用 sql_agent 的 ask_agent，question 是：今天的卡时使用率多少？language 是 zh
+读取 @sql_agent:capabilities://sql-agent，然后用 sql_agent 回答我能查哪些业务问题
+```
+
+如果 HTTP 方式不适合，也可以用 stdio 方式让 Claude Code 自动拉起北向 MCP：
+
+If HTTP is not suitable, use stdio and let Claude Code start the northbound MCP process:
+
+```bash
+claude mcp add \
+  --transport stdio \
+  --scope user \
+  --env UV_CACHE_DIR=/Users/jiegenglyu/sql_agent/.uv-cache \
+  sql_agent \
+  -- uv --directory /Users/jiegenglyu/sql_agent run python -m backend.app.mcp.public_server
+```
+
+#### OpenClaw
+
+OpenClaw 的 `openclaw mcp set` 用于保存外部 MCP server 定义，供 OpenClaw 启动或配置的运行时使用：
+
+OpenClaw uses `openclaw mcp set` to save outbound MCP server definitions for runtimes it launches or configures:
+
+```bash
+openclaw mcp set sql_agent '{"url":"http://127.0.0.1:8001/mcp","transport":"streamable-http"}'
+openclaw mcp list
+openclaw mcp show sql_agent --json
+```
+
+#### OpenCode
+
+OpenCode 在 `opencode.json` 的 `mcp` 字段下配置 MCP server。远程 HTTP 配置如下：
+
+OpenCode configures MCP servers under the `mcp` field in `opencode.json`. For remote HTTP:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "sql_agent": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8001/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+如果希望 OpenCode 自动拉起本地进程，可以使用 local/stdout MCP 配置：
+
+If you want OpenCode to start the local process itself, use local stdio MCP:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "sql_agent": {
+      "type": "local",
+      "command": [
+        "uv",
+        "--directory",
+        "/Users/jiegenglyu/sql_agent",
+        "run",
+        "python",
+        "-m",
+        "backend.app.mcp.public_server"
+      ],
+      "environment": {
+        "UV_CACHE_DIR": "/Users/jiegenglyu/sql_agent/.uv-cache"
+      },
+      "enabled": true
+    }
+  }
+}
+```
+
+在 OpenCode 中提示模型使用 `sql_agent`：
+
+Prompt OpenCode to use `sql_agent`:
+
+```text
+先用 sql_agent 的 describe_capabilities 看能查什么，然后查询今天的卡时使用率。
+```
+
+如果外部 agent 不在本机运行，`127.0.0.1` 会指向 agent 所在环境。此时需要把北向 MCP 绑定到可访问地址，并在受信网络或反向代理鉴权后使用：
+
+If the external agent does not run on the same machine, `127.0.0.1` points to the agent's own environment. Bind the northbound MCP to a reachable address and put it behind a trusted network or authenticated reverse proxy:
+
+```bash
+PUBLIC_MCP_HOST=0.0.0.0 make public-mcp
 ```
 
 运行测试。
@@ -168,6 +319,7 @@ Do not commit `.env`. It is ignored by Git; the repository only commits `.env.ex
 | 分组 / Group | 变量 / Variables |
 | --- | --- |
 | App and CORS | `APP_NAME`, `APP_API_PREFIX`, `APP_TIMEZONE`, `CORS_ORIGINS`, `BACKEND_PORT`, `FRONTEND_PORT`, `VITE_API_BASE_URL`, `VITE_API_PREFIX` |
+| Northbound MCP | `PUBLIC_MCP_TRANSPORT`, `PUBLIC_MCP_HOST`, `PUBLIC_MCP_PORT`, `PUBLIC_MCP_PATH`, `PUBLIC_MCP_STATELESS_HTTP` |
 | Demo PostgreSQL container | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST_PORT`, `POSTGRES_READONLY_USER`, `POSTGRES_READONLY_PASSWORD` |
 | Backend database connection | `DATABASE_URL`, `PG_MAX_ROWS`, `PG_STATEMENT_TIMEOUT_MS`, `PG_SCHEMA_LIMIT`, `PG_SCHEMAS` |
 | Business rules and Agent debug | `BUSINESS_RULES_DIR`, `BUSINESS_RULE_MAX_FILE_BYTES`, `BUSINESS_RULE_MAX_RESULTS`, `AGENT_VERBOSE_DEBUG`, `AGENT_DEBUG_LOG_PATH` |
