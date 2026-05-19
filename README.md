@@ -1,25 +1,25 @@
 # sql_agent
 
-可追踪的中英双语 PostgreSQL 业务数据 Agent。用户可以用中文或英文提问，后端 Agent 会通过只读 MCP 工具解析日期、检索业务规则、读取数据库结构、校验并执行受保护的 `SELECT` 查询，最后返回业务答案和结果表。
+可追踪的中英双语 PostgreSQL 业务数据 Agent。用户可以用中文或英文通过 MCP 提问，后端 Agent 会统一协调读取业务规则原文、读取数据库结构、调用大模型生成 SQL、校验并执行受保护的 `SELECT` 查询，最后返回业务答案、SQL、来源表、执行链路和结果表。
 
-Traceable bilingual business data Agent for PostgreSQL. Users can ask questions in Chinese or English; the backend Agent uses read-only MCP tools to resolve dates, retrieve business rules, inspect schema, validate and execute guarded `SELECT` queries, then return a business answer and result table.
+Traceable bilingual business data Agent for PostgreSQL. Users can ask questions in Chinese or English through MCP; the backend Agent coordinates business-rule context, schema inspection, model-generated SQL, readonly validation, guarded execution, then returns the answer, SQL, source tables, trace, and result rows.
 
 ## 项目简介 / Overview
 
-`sql_agent` 面向需要“用自然语言查业务数据库”的场景。它把大模型生成 SQL 的过程拆成可审计步骤，并在执行前后加入只读校验、业务规则检索、Schema 描述和结果追踪。
+`sql_agent` 面向需要“用自然语言查业务数据库”的场景。它把一次 MCP 查询拆成可审计步骤：鉴权、读取业务规则 Markdown、读取 Schema、生成 SQL、只读校验、数据库查询和回答生成。
 
-`sql_agent` is built for business data workflows where users query databases with natural language. It makes the LLM-to-SQL path auditable by adding read-only validation, business rule retrieval, schema inspection, and execution tracing around generated SQL.
+`sql_agent` is built for business data workflows where users query databases with natural language. It makes the MCP-to-SQL path auditable through authentication, Markdown business-rule context, schema inspection, SQL generation, readonly validation, query execution, and answer generation.
 
 ## 功能特性 / Features
 
-- 结构化业务规则路由：支持按表维护规则文件，自动携带固定查询逻辑，并只注入命中的业务逻辑段。
-- Structured business-rule routing: maintain one rule file per table, always include fixed query logic, and inject only matched business logic sections.
-- 歧义澄清：当问题命中低置信度或多个业务含义时，Agent 会先追问澄清，不直接生成 SQL。
-- Ambiguity clarification: when confidence is low or multiple business meanings match, the Agent asks a clarification question before writing SQL.
-- 精准 Schema 读取：规则解析出候选表后，只调用所选表的元数据；缺少结构化规则时才回退到完整 Schema 概览。
-- Targeted schema loading: after rule resolution selects tables, the Agent loads only selected table metadata and falls back to full schema overview only when structured rules are unavailable.
-- AI infra 演示规则：内置 GPU 卡时使用率、核心利用率、单卡时成本、总卡数和容量告警等示例规则。
-- AI infra demo rules: bundled examples cover GPU-hour utilization, core utilization, per-GPU-hour cost, total GPU count, and capacity alerts.
+- 业务规则原文驱动：Agent 读取 Markdown 规则作为 SQL 生成上下文，本地代码不硬编码复杂业务解析。
+- Business-rule-context driven: the Agent reads Markdown rules as SQL-generation context instead of hard-coding complex business parsing locally.
+- 资源池和卡型号联合查询：内置 `resource_pools` 和 `gpu_card_models` 两张演示业务表，通过 `pool_type` 支持 JOIN。
+- Resource pool and card-model joins: bundled demo tables `resource_pools` and `gpu_card_models` join through `pool_type`.
+- 明确错误状态：查询失败直接返回 `error`，区分鉴权失败、模型失败、SQL 错误、查询超时和没有数据。
+- Explicit error status: failures return `error` directly, including auth failures, model errors, SQL errors, query timeouts, and no-data results.
+- MCP 看板：前端展示调用方、鉴权状态、执行链路、SQL、来源表、配置和结构化结果。
+- MCP dashboard: the frontend shows caller, auth state, trace, SQL, source tables, config, and structured rows.
 
 ## 架构 / Architecture
 
@@ -27,8 +27,8 @@ Traceable bilingual business data Agent for PostgreSQL. Users can ask questions 
 - 南向 MCP 工具 / Southbound MCP tools: internal PostgreSQL and business rule tools in `backend/app/mcp/server.py`.
 - 北向 MCP 接口 / Northbound MCP interface: public question-answer tool in `backend/app/mcp/public_server.py`.
 - PostgreSQL 访问 / PostgreSQL access: read-only SQL guard plus PostgreSQL read-only transaction execution.
-- 业务规则 / Business rules: local folder resolve/list/search/read limited to `backend/business_rules`.
-- 前端 / Frontend: Vite React business query console in `frontend`, with Chinese and English UI switching.
+- 业务规则 / Business rules: local folder context/list/search/read limited to `backend/business_rules`.
+- 前端 / Frontend: Vite React MCP dashboard in `frontend`.
 
 ## 安全边界 / Security Boundaries
 
@@ -44,6 +44,8 @@ Traceable bilingual business data Agent for PostgreSQL. Users can ask questions 
 - Business rule tools do not use shell commands, are limited to list/search/read inside the configured directory, and reject absolute paths, path escapes, unsupported extensions, symlinks, and oversized files.
 - 本地密钥只放在 `.env`，该文件已被 Git 忽略。
 - Local secrets live only in `.env`, which is ignored by Git.
+- 北向 MCP 工具必须传 `api_key`，有效 key 从 `MCP_API_KEYS` 读取。
+- Northbound MCP tools require an `api_key`; valid keys are read from `MCP_API_KEYS`.
 
 ## 本地安装 / Local Setup
 
@@ -111,26 +113,26 @@ Start the northbound MCP server. This server exposes only public Agent-facing ca
 
 ```bash
 make public-mcp
-# streamable HTTP endpoint: http://127.0.0.1:8001/mcp
+# standard stateful Streamable HTTP endpoint: http://127.0.0.1:8001/mcp
 ```
 
 北向 MCP 暴露两个工具和一个 resource：
 
 The northbound MCP exposes two tools and one resource:
 
-- `ask_agent`: 提问并返回公开答案，不返回 SQL、表结构、执行 trace 或原始明细行。
+- `ask_agent`: 提问并返回 `status`、`answer`、`result.columns`、`result.rows`、`result.sql`、`source_tables`、`trace` 和 `error`。
 - `describe_capabilities`: 根据当前业务规则返回“能查什么”的公开摘要；如果配置了 LLM，会优先使用 LLM 压缩总结，失败时回退到本地规则摘要。
 - `capabilities://sql-agent`: 同一份能力摘要的 MCP resource，方便外部 agent 在选择工具前读取。
 
-如果 MCP client 使用 stdio 配置，使用 `mcp.public.json`。`mcp.json` 是内部南向工具配置，不要作为外部用户入口。
+外部用户入口统一使用 HTTP remote MCP。`mcp.json` 是内部南向工具配置，不要作为外部用户入口。
 
-For stdio MCP clients, use `mcp.public.json`. `mcp.json` is the internal southbound tools config and should not be used as the external user entrypoint.
+External clients should use HTTP remote MCP. `mcp.json` is the internal southbound tools config and should not be used as the external user entrypoint.
 
 ### 外部 Agent 接入 / External Agent MCP Clients
 
-先启动北向 MCP 服务。默认只监听本机 `127.0.0.1`，未启用鉴权；不要直接暴露到公网。
+先启动北向 MCP 服务。默认只监听本机 `127.0.0.1`，工具调用必须携带 `api_key`。
 
-Start the northbound MCP server first. It binds to local `127.0.0.1` by default and has no authentication; do not expose it directly to the public internet.
+Start the northbound MCP server first. It binds to local `127.0.0.1` by default and tool calls must include `api_key`.
 
 ```bash
 make public-mcp
@@ -143,6 +145,8 @@ Claude Code 推荐使用 HTTP MCP：
 Claude Code should use HTTP MCP:
 
 ```bash
+PUBLIC_MCP_HOST=0.0.0.0 PUBLIC_MCP_STATELESS_HTTP=false make public-mcp
+
 claude mcp add \
   --transport http \
   --scope user \
@@ -162,22 +166,9 @@ Inside Claude Code, use `/mcp` to inspect the connection. If a running session d
 Example prompts:
 
 ```text
-调用 sql_agent 的 describe_capabilities，language=zh
-调用 sql_agent 的 ask_agent，question 是：今天的卡时使用率多少？language 是 zh
+调用 sql_agent 的 describe_capabilities，api_key=sk-1234，language=zh
+调用 sql_agent 的 ask_agent，api_key=sk-1234，caller=claude-code，question 是：Xlarge 是什么卡？language 是 zh
 读取 @sql_agent:capabilities://sql-agent，然后用 sql_agent 回答我能查哪些业务问题
-```
-
-如果 HTTP 方式不适合，也可以用 stdio 方式让 Claude Code 自动拉起北向 MCP：
-
-If HTTP is not suitable, use stdio and let Claude Code start the northbound MCP process:
-
-```bash
-claude mcp add \
-  --transport stdio \
-  --scope user \
-  --env UV_CACHE_DIR=/Users/jiegenglyu/sql_agent/.uv-cache \
-  sql_agent \
-  -- uv --directory /Users/jiegenglyu/sql_agent run python -m backend.app.mcp.public_server
 ```
 
 #### OpenClaw
@@ -211,40 +202,12 @@ OpenCode configures MCP servers under the `mcp` field in `opencode.json`. For re
 }
 ```
 
-如果希望 OpenCode 自动拉起本地进程，可以使用 local/stdout MCP 配置：
-
-If you want OpenCode to start the local process itself, use local stdio MCP:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "sql_agent": {
-      "type": "local",
-      "command": [
-        "uv",
-        "--directory",
-        "/Users/jiegenglyu/sql_agent",
-        "run",
-        "python",
-        "-m",
-        "backend.app.mcp.public_server"
-      ],
-      "environment": {
-        "UV_CACHE_DIR": "/Users/jiegenglyu/sql_agent/.uv-cache"
-      },
-      "enabled": true
-    }
-  }
-}
-```
-
 在 OpenCode 中提示模型使用 `sql_agent`：
 
 Prompt OpenCode to use `sql_agent`:
 
 ```text
-先用 sql_agent 的 describe_capabilities 看能查什么，然后查询今天的卡时使用率。
+先用 sql_agent 的 describe_capabilities 看能查什么，然后查询 Xlarge 是什么卡。调用工具时传 api_key。
 ```
 
 如果外部 agent 不在本机运行，`127.0.0.1` 会指向 agent 所在环境。此时需要把北向 MCP 绑定到可访问地址，并在受信网络或反向代理鉴权后使用：
@@ -280,25 +243,22 @@ The demo PostgreSQL service uses database `circle_demo`; the business schema is 
 
 演示表 / Demo tables:
 
-- `aiinfra.clusters`
-- `aiinfra.gpu_nodes`
-- `aiinfra.teams`
-- `aiinfra.workloads`
-- `aiinfra.gpu_allocations`
-- `aiinfra.daily_gpu_metrics`
-- `aiinfra.capacity_events`
+- `aiinfra.resource_pools`
+- `aiinfra.gpu_card_models`
+
+两张表通过 `pool_type` 关联。业务规则写在 `backend/business_rules/resource_pools.md` 和 `backend/business_rules/gpu_card_models.md`，Agent 会读取规则原文后让模型生成 SQL。
+
+The two tables join through `pool_type`. Business rules live in `backend/business_rules/resource_pools.md` and `backend/business_rules/gpu_card_models.md`; the Agent reads those Markdown files before asking the model to generate SQL.
 
 示例问题 / Example questions:
 
 | 中文 | English |
 | --- | --- |
-| 今天的卡时使用率多少？ | What is today's GPU-hour utilization rate? |
-| 这一周的卡时使用率多少？ | What is the GPU-hour utilization rate this week? |
-| 现在 AI infra 总卡数是多少？ | How many total GPU cards does AI infra have now? |
-| 最新一天各集群的卡时使用率是多少？ | What is each cluster's GPU-hour utilization rate on the latest day? |
-| 哪些集群有容量压力？ | Which clusters have capacity pressure? |
-| 最新一天单卡时成本是多少？ | What is the per-GPU-hour cost on the latest day? |
-| 当前未解决的容量告警有哪些？ | What unresolved capacity alerts are currently open? |
+| Xlarge 是什么卡？ | What GPU card does Xlarge use? |
+| A100 有哪些资源池？ | Which resource pools use A100? |
+| 按卡型号统计资源池容量。 | Summarize resource pool capacity by GPU model. |
+| cn-east 区域有哪些资源池？ | Which resource pools are in cn-east? |
+| QuantumPool 是什么卡？ | What card does QuantumPool use? |
 
 ## 配置 / Configuration
 
@@ -319,12 +279,12 @@ Do not commit `.env`. It is ignored by Git; the repository only commits `.env.ex
 | 分组 / Group | 变量 / Variables |
 | --- | --- |
 | App and CORS | `APP_NAME`, `APP_API_PREFIX`, `APP_TIMEZONE`, `CORS_ORIGINS`, `BACKEND_PORT`, `FRONTEND_PORT`, `VITE_API_BASE_URL`, `VITE_API_PREFIX` |
-| Northbound MCP | `PUBLIC_MCP_TRANSPORT`, `PUBLIC_MCP_HOST`, `PUBLIC_MCP_PORT`, `PUBLIC_MCP_PATH`, `PUBLIC_MCP_STATELESS_HTTP` |
+| Northbound MCP | `PUBLIC_MCP_TRANSPORT`, `PUBLIC_MCP_HOST`, `PUBLIC_MCP_PORT`, `PUBLIC_MCP_PATH`, `PUBLIC_MCP_STATELESS_HTTP`, `MCP_API_KEYS` |
 | Demo PostgreSQL container | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST_PORT`, `POSTGRES_READONLY_USER`, `POSTGRES_READONLY_PASSWORD` |
 | Backend database connection | `DATABASE_URL`, `PG_MAX_ROWS`, `PG_STATEMENT_TIMEOUT_MS`, `PG_SCHEMA_LIMIT`, `PG_SCHEMAS` |
 | Business rules and Agent debug | `BUSINESS_RULES_DIR`, `BUSINESS_RULE_MAX_FILE_BYTES`, `BUSINESS_RULE_MAX_RESULTS`, `AGENT_VERBOSE_DEBUG`, `AGENT_DEBUG_LOG_PATH` |
 | LLM provider | `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT_SECONDS` |
 
-前端右侧配置面板也会显示同一组数据库和大模型配置。`PG_SCHEMAS` 为空时读取全部非系统 Schema；填写 `aiinfra,public` 这类逗号分隔值时，Agent 的 Schema 概览和表元数据收集会限定到这些 Schema。如果大模型配置缺失，后端仍可针对内置 `aiinfra` Schema 运行有限的本地演示回退逻辑；生产使用应配置真实的大模型服务。
+前端看板会显示同一组数据库、大模型和 MCP 鉴权配置。`PG_SCHEMAS` 为空时读取全部非系统 Schema；填写 `aiinfra,public` 这类逗号分隔值时，Agent 的 Schema 概览会限定到这些 Schema。大模型配置缺失或调用失败时，查询直接返回 `llm_error`，不会使用本地 SQL 降级。
 
-The frontend configuration panel shows the same database and model fields. Leave `PG_SCHEMAS` empty to read all non-system schemas; set comma-separated values such as `aiinfra,public` to scope the Agent schema overview and table metadata collection. If the model config is missing, the backend can still run a limited local demo fallback for the bundled `aiinfra` schema; production use should configure a real model provider.
+The frontend dashboard shows the same database, model, and MCP auth fields. Leave `PG_SCHEMAS` empty to read all non-system schemas; set comma-separated values such as `aiinfra,public` to scope the Agent schema overview. If the model config is missing or model calls fail, queries return `llm_error` directly; there is no local SQL fallback.

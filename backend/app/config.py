@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     business_rule_max_results: int = Field(default=8, alias="BUSINESS_RULE_MAX_RESULTS")
     agent_verbose_debug: bool = Field(default=False, alias="AGENT_VERBOSE_DEBUG")
     agent_debug_log_path: Path = Field(default=Path("logs/agent-debug.log"), alias="AGENT_DEBUG_LOG_PATH")
+    mcp_api_keys: Annotated[list[str], NoDecode] = Field(default_factory=list, alias="MCP_API_KEYS")
 
     llm_provider: str = Field(default="manual", alias="LLM_PROVIDER")
     llm_base_url: str | None = Field(default=None, alias="LLM_BASE_URL")
@@ -59,6 +60,15 @@ class Settings(BaseSettings):
     @field_validator("pg_schemas", mode="before")
     @classmethod
     def split_pg_schemas(cls, value: object) -> object:
+        if isinstance(value, str):
+            return _unique_clean_names(value)
+        if isinstance(value, list):
+            return _unique_clean_names(value)
+        return value
+
+    @field_validator("mcp_api_keys", mode="before")
+    @classmethod
+    def split_mcp_api_keys(cls, value: object) -> object:
         if isinstance(value, str):
             return _unique_clean_names(value)
         if isinstance(value, list):

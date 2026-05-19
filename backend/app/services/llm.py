@@ -73,7 +73,11 @@ def generate_sql(
                 "content": (
                     "You generate PostgreSQL SELECT queries only. "
                     "Return one SQL statement and no markdown. "
-                    "Resolve relative dates with the provided date context."
+                    "Use the business rule documents as the source of truth for business logic, joins, filters, "
+                    "and metric definitions. Use only tables and columns present in the provided schema. "
+                    "Resolve relative dates with the provided date context. "
+                    "If the question cannot be answered with the provided rules and schema, return a SELECT "
+                    "that produces zero rows with clear column aliases instead of inventing tables or columns."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -161,10 +165,12 @@ def _build_prompt(
             "",
             "Constraints:",
             "- Use PostgreSQL syntax.",
-            "- Use only tables and columns visible in the selected schema metadata.",
-            "- Treat fixed business-rule logic as mandatory for every selected table.",
+            "- Use only tables and columns visible in the provided schema metadata.",
+            "- Treat the business rule documents as source-of-truth context for SQL generation.",
+            "- Follow join keys and fixed business-rule logic from the Markdown files.",
             "- Generate a single read-only SELECT or WITH query.",
             "- Include a LIMIT when the request does not imply aggregation.",
+            "- Do not invent tables, columns, joins, metrics, or values.",
         ]
     )
 

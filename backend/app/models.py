@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 StepStatus = Literal["pending", "running", "success", "warning", "error"]
 UiLanguage = Literal["auto", "zh", "en"]
+AgentStatus = Literal["success", "error"]
 
 
 class TraceStep(BaseModel):
@@ -34,6 +35,8 @@ class AgentQueryResponse(BaseModel):
     validation: dict[str, Any]
     result: dict[str, Any] | None = None
     token_usage: "TokenUsage" = Field(default_factory=lambda: TokenUsage())
+    status: AgentStatus = "success"
+    error: dict[str, Any] | None = None
 
 
 class RuleSearchResponse(BaseModel):
@@ -96,6 +99,8 @@ class HealthResponse(BaseModel):
     app_timezone: str
     business_rules_dir: str
     agent_verbose_debug: bool = False
+    mcp_auth_configured: bool = False
+    mcp_key_count: int = 0
     token_usage: "TokenUsage" = Field(default_factory=lambda: TokenUsage())
 
 
@@ -132,6 +137,8 @@ class RuntimeConfigResponse(BaseModel):
     pg_schema_limit: int
     pg_schemas: list[str] = Field(default_factory=list)
     agent_verbose_debug: bool = False
+    mcp_auth_configured: bool = False
+    mcp_key_count: int = 0
     database: DatabaseRuntimeConfig
     llm: LlmRuntimeConfig
 

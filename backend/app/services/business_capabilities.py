@@ -76,7 +76,8 @@ def public_tool_description() -> str:
     summary = public_capability_text(language="zh", use_llm=False)
     return (
         "Ask the SQL Agent a business data question. "
-        "The tool returns a public answer only and does not expose SQL, schemas, tables, traces, or raw rows. "
+        "The tool returns the answer, execution status, SQL, source tables, trace, and raw tabular rows. "
+        "An api_key argument is required. "
         "Current business capability summary: "
         f"{_truncate(summary, 900)}"
     )

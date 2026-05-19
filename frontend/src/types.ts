@@ -36,7 +36,9 @@ export interface QueryResult {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   row_count: number;
-  limited_sql: string;
+  limited_sql: string | null;
+  sql?: string;
+  source_tables?: string[];
 }
 
 export interface TableMetadata {
@@ -70,6 +72,47 @@ export interface AgentResponse {
   validation: SqlValidation;
   result: QueryResult | null;
   token_usage: TokenUsage;
+  status: "success" | "error";
+  error: AgentError | null;
+}
+
+export interface AgentError {
+  code: string;
+  message: string;
+}
+
+export interface PublicMcpResponse {
+  question: string | null;
+  caller?: string | null;
+  answer: string;
+  status: "success" | "error";
+  executed: boolean;
+  needs_clarification: boolean;
+  row_count: number | null;
+  result: QueryResult | null;
+  error: AgentError | null;
+  trace: TraceStep[];
+  rules: RuleSearchResult[];
+  schema: Record<string, unknown> | null;
+  token_usage: TokenUsage;
+  capabilities?: Record<string, unknown>;
+}
+
+export interface McpCallRecord {
+  ts: string;
+  tool: string;
+  caller: string;
+  question: string | null;
+  status: "success" | "error";
+  row_count: number | null;
+  error: AgentError | null;
+  source_tables: string[];
+  response: PublicMcpResponse | Record<string, unknown>;
+}
+
+export interface McpCallsResponse {
+  calls: McpCallRecord[];
+  count: number;
 }
 
 export interface HealthResponse {
@@ -81,6 +124,8 @@ export interface HealthResponse {
   app_timezone: string;
   business_rules_dir: string;
   agent_verbose_debug: boolean;
+  mcp_auth_configured: boolean;
+  mcp_key_count: number;
   token_usage: TokenUsage;
 }
 
@@ -117,6 +162,8 @@ export interface RuntimeConfigResponse {
   pg_schema_limit: number;
   pg_schemas: string[];
   agent_verbose_debug: boolean;
+  mcp_auth_configured: boolean;
+  mcp_key_count: number;
   database: DatabaseRuntimeConfig;
   llm: LlmRuntimeConfig;
 }

@@ -12,31 +12,31 @@ Supported file types:
 
 The rule search and read tools are intentionally limited to this directory. The Agent can list files, search across files for candidate rules, then read a selected file or line range for the final SQL prompt. Rule reads reject absolute paths, parent-directory escapes, symlinks that resolve outside the directory, oversized files, and unsupported extensions.
 
-For Agent query routing, prefer one structured rule file per table:
+For Agent query routing, prefer one structured rule file per business table:
 
 ```text
-daily_gpu_metrics.md
-gpu_nodes.md
-capacity_events.md
+resource_pools.md
+gpu_card_models.md
 ```
 
 Use this shape:
 
 ```md
-# daily_gpu_metrics
+# resource_pools
 
 schema: aiinfra
-table: daily_gpu_metrics
-aliases: 卡时, 使用率, 单卡时成本
-related_tables: aiinfra.clusters, aiinfra.teams
+table: resource_pools
+aliases: 资源池, resource pool, Xlarge
+related_tables: aiinfra.gpu_card_models
+join_keys: resource_pools.pool_type = gpu_card_models.pool_type
 
 ### 固定查询逻辑 ###
 - Rules in this block are always included when the table is selected.
 
 ### 业务逻辑 ###
 
-## 单卡时成本
-keywords: 单卡时成本, cost per GPU-hour
+## 资源池卡型号
+keywords: Xlarge 是什么卡, 资源池是什么卡, 卡型号
 - Rules in this section are included only when the user question matches it.
 ```
 

@@ -30,6 +30,8 @@ def read_runtime_config() -> dict[str, Any]:
         "pg_schema_limit": settings.pg_schema_limit,
         "pg_schemas": settings.pg_schemas,
         "agent_verbose_debug": settings.agent_verbose_debug,
+        "mcp_auth_configured": bool(settings.mcp_api_keys),
+        "mcp_key_count": len(settings.mcp_api_keys),
         "database": parsed_database,
         "llm": {
             "provider": settings.llm_provider,

@@ -12,4 +12,4 @@ psql \
   -v readonly_password="${POSTGRES_READONLY_PASSWORD}" \
   --username "${POSTGRES_USER}" \
   --dbname "${POSTGRES_DB}" \
-  --file /docker-entrypoint-initdb.d/001-init.sql
+  --file /tmp/sql-agent-init.sql

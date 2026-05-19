@@ -97,7 +97,7 @@ class AgentBusinessRuleExpansionTests(unittest.TestCase):
         self.assertIn("卡时使用率", response.rules[0]["content"])
         self.assertEqual([step.name for step in trace], ["mcp.business_rule_search", "mcp.business_rule_read"])
 
-    def test_prepares_context_with_selected_tables_without_schema_overview(self) -> None:
+    def test_prepares_context_by_reading_rule_context_and_schema_overview(self) -> None:
         trace = []
         calls = []
 
@@ -105,48 +105,26 @@ class AgentBusinessRuleExpansionTests(unittest.TestCase):
             calls.append((name, arguments))
             if name == "current_date_context":
                 return {"today": "2026-05-14", "timezone": "Asia/Shanghai"}
-            if name == "business_rule_resolve":
+            if name == "business_rule_context":
                 return {
-                    "clarification_required": False,
-                    "reason": "confident_match",
-                    "confidence": 0.9,
-                    "candidates": [
+                    "question": arguments["question"],
+                    "rule_count": 2,
+                    "rules": [
                         {
-                            "path": "daily_gpu_metrics.md",
-                            "schema": "usage",
-                            "table": "daily_gpu_metrics",
-                            "score": 42,
-                            "fixed_logic": "- 默认使用最新 metric_date。",
-                            "matched_sections": [
-                                {
-                                    "title": "单卡时成本",
-                                    "content": "- 单卡时成本 = cost_usd / allocated_gpu_hours。",
-                                    "score": 30,
-                                }
-                            ],
-                            "snippets": [{"line": 10, "text": "单卡时成本"}],
-                        }
-                    ],
-                    "selected_tables": [
-                        {
-                            "schema": "usage",
-                            "table": "daily_gpu_metrics",
-                            "role": "primary",
-                            "source_path": "daily_gpu_metrics.md",
-                            "reason": "business_rule_match",
+                            "path": "resource_pools.md",
+                            "schema": "aiinfra",
+                            "table": "resource_pools",
+                            "content": "join_keys: resource_pools.pool_type = gpu_card_models.pool_type",
                         }
                     ],
                 }
-            if name == "pg_describe_table":
+            if name == "pg_schema_overview":
                 return {
-                    "schema": arguments["schema"],
-                    "table": arguments["table"],
-                    "table_type": "BASE TABLE",
-                    "estimated_rows": 10,
-                    "comment": None,
-                    "columns": [{"column_name": "cost_usd"}, {"column_name": "allocated_gpu_hours"}],
-                    "indexes": [],
-                    "error": None,
+                    "tables": [
+                        {"schema": "aiinfra", "table": "resource_pools"},
+                        {"schema": "aiinfra", "table": "gpu_card_models"},
+                    ],
+                    "table_count": 2,
                 }
             raise AssertionError(f"unexpected tool call: {name}")
 
@@ -157,39 +135,36 @@ class AgentBusinessRuleExpansionTests(unittest.TestCase):
                 language="zh",
             )
 
-        self.assertIsNone(prepared["clarification_response"])
-        self.assertEqual(prepared["schema"]["table_count"], 1)
-        self.assertIn("默认使用最新", prepared["rules"][0]["content"])
-        self.assertNotIn("pg_schema_overview", [name for name, _ in calls])
+        self.assertEqual(prepared["schema"]["table_count"], 2)
+        self.assertIn("join_keys", prepared["rules"][0]["content"])
+        self.assertEqual([name for name, _ in calls], ["current_date_context", "business_rule_context", "pg_schema_overview"])
 
-    def test_orchestrated_agent_returns_clarification_without_sql(self) -> None:
+    def test_orchestrated_agent_reports_sql_validation_error_without_fallback(self) -> None:
         trace = []
 
         def fake_call(name, arguments):
             if name == "current_date_context":
                 return {"today": "2026-05-14", "timezone": "Asia/Shanghai"}
-            if name == "business_rule_resolve":
-                return {
-                    "clarification_required": True,
-                    "reason": "low_confidence",
-                    "confidence": 0.5,
-                    "candidates": [],
-                    "selected_tables": [],
-                    "options": [
-                        {"label": "卡时使用率", "table": "usage.daily_gpu_metrics"},
-                        {"label": "GPU/NPU 核心利用率", "table": "usage.device_utilization"},
-                    ],
-                }
+            if name == "business_rule_context":
+                return {"rules": [{"path": "resource_pools.md", "content": "table: resource_pools"}]}
+            if name == "pg_schema_overview":
+                return {"tables": [{"schema": "aiinfra", "table": "resource_pools"}], "table_count": 1}
+            if name == "pg_validate_sql":
+                return {"ok": False, "reason": "Only SELECT or read-only WITH queries are allowed.", "limited_sql": None}
             raise AssertionError(f"unexpected tool call: {name}")
 
-        with patch.object(agent, "_call_mcp_tool", side_effect=fake_call):
-            response = agent._run_orchestrated_agent(AgentQueryRequest(question="查一下使用情况"), trace)
+        with (
+            patch.object(agent, "_call_mcp_tool", side_effect=fake_call),
+            patch.object(agent, "generate_sql", return_value="DELETE FROM aiinfra.resource_pools"),
+        ):
+            response = agent._run_orchestrated_agent(AgentQueryRequest(question="查一下资源池"), trace)
 
+        self.assertEqual(response.status, "error")
+        self.assertEqual(response.error["code"], "sql_validation_error")
         self.assertFalse(response.executed)
-        self.assertEqual(response.sql, "")
-        self.assertIn("你想看哪一种", response.answer)
-        self.assertIn("卡时使用率", response.answer)
-        self.assertEqual(trace[-1].name, "clarification")
+        self.assertEqual(response.sql, "DELETE FROM aiinfra.resource_pools")
+        self.assertNotEqual(response.sql, "SELECT 1 AS agent_ready")
+        self.assertEqual(trace[-1].name, "mcp.pg_validate_sql")
 
 
 if __name__ == "__main__":

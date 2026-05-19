@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from backend.app.models import AgentQueryRequest, AgentQueryResponse, TraceStep
+from backend.app.models import AgentQueryRequest, AgentQueryResponse, TokenUsage, TraceStep
 from backend.app.services.llm import (
     LLMNotConfigured,
     chat_completion,
@@ -30,6 +30,17 @@ DEFAULT_VALIDATION: dict[str, Any] = {
     "limited_sql": None,
 }
 
+
+class AgentExecutionError(RuntimeError):
+    """Raised for a user-visible Agent execution failure."""
+
+    def __init__(self, code: str, message: str, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.detail = detail or {}
+
+
 AGENT_TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -44,6 +55,24 @@ AGENT_TOOL_SPECS: list[dict[str, Any]] = [
                         "description": "Optional IANA timezone, for example Asia/Shanghai.",
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "business_rule_context",
+            "description": (
+                "Read the configured business rule documents as source-of-truth context for SQL generation. "
+                "Use this before generating SQL for business questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+                "required": ["question"],
             },
         },
     },
@@ -186,43 +215,46 @@ AGENT_TOOL_SPECS: list[dict[str, Any]] = [
 def run_agent_query(request: AgentQueryRequest, on_trace: TraceCallback | None = None) -> AgentQueryResponse:
     trace: list[TraceStep] = []
     usage_token = begin_token_usage()
-    usage_finished = False
     trace_callback_token = _TRACE_CALLBACK.set(on_trace)
 
     try:
-        if is_llm_configured():
-            try:
-                response = _run_tool_calling_agent(request, trace)
-                usage = finish_token_usage(usage_token)
-                usage_finished = True
-                response = response.model_copy(update={"token_usage": usage})
-                _log_agent_debug("agent.final", response.model_dump(mode="json", by_alias=True))
-                return response
-            except LLMNotConfigured as exc:
-                _append_trace(trace, "llm_agent_loop", "warning", str(exc), {"mode": "tool_calling"})
-            except Exception as exc:
-                _append_trace(
-                    trace,
-                    "llm_agent_loop",
-                    "warning",
-                    f"Tool-calling agent loop failed; falling back to orchestrated mode: {exc}",
-                    {"mode": "tool_calling"},
+        try:
+            if not is_llm_configured():
+                raise AgentExecutionError(
+                    "llm_error",
+                    "LLM is not configured. Configure LLM_PROVIDER, LLM_BASE_URL, LLM_MODEL, and LLM_API_KEY.",
                 )
-
-        response = _run_orchestrated_agent(request, trace)
-        usage = finish_token_usage(usage_token)
-        usage_finished = True
-        response = response.model_copy(update={"token_usage": usage})
+            response = _run_orchestrated_agent(request, trace)
+        except AgentExecutionError as exc:
+            response = _error_response(
+                request=request,
+                trace=trace,
+                code=exc.code,
+                message=exc.message,
+                sql=str(exc.detail.get("sql") or ""),
+                rules=_rules_list(exc.detail.get("rules")),
+                schema=exc.detail.get("schema") if isinstance(exc.detail.get("schema"), dict) else None,
+                validation=exc.detail.get("validation") if isinstance(exc.detail.get("validation"), dict) else None,
+                result=exc.detail.get("result") if isinstance(exc.detail.get("result"), dict) else None,
+            )
+        except Exception as exc:
+            _log_agent_debug(
+                "agent.error",
+                {"question": request.question, "trace": [step.model_dump(mode="json") for step in trace]},
+            )
+            response = _error_response(
+                request=request,
+                trace=trace,
+                code="agent_error",
+                message=str(exc),
+            )
+        try:
+            usage = finish_token_usage(usage_token)
+        except Exception:
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}
+        response = response.model_copy(update={"token_usage": TokenUsage(**usage)})
         _log_agent_debug("agent.final", response.model_dump(mode="json", by_alias=True))
         return response
-    except Exception:
-        if not usage_finished:
-            finish_token_usage(usage_token)
-        _log_agent_debug(
-            "agent.error",
-            {"question": request.question, "trace": [step.model_dump(mode="json") for step in trace]},
-        )
-        raise
     finally:
         _TRACE_CALLBACK.reset(trace_callback_token)
 
@@ -383,8 +415,6 @@ def _run_orchestrated_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
     max_rows = request.max_rows or 200
 
     prepared = _prepare_query_context(request, trace, language=language)
-    if prepared.get("clarification_response"):
-        return prepared["clarification_response"]
     date_context = prepared["date_context"]
     rules = prepared["rules"]
     schema = prepared["schema"]
@@ -395,19 +425,56 @@ def _run_orchestrated_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
     else:
         sql = _generate_sql(request, schema, rules if isinstance(rules, list) else [], date_context, trace)
 
-    validation = _safe_tool_call(trace, "pg_validate_sql", {"sql": sql, "max_rows": max_rows})
+    validation = _required_tool_call(
+        trace,
+        "pg_validate_sql",
+        {"sql": sql, "max_rows": max_rows},
+        error_code="sql_validation_error",
+        context={"sql": sql, "rules": rules, "schema": schema},
+    )
     if not isinstance(validation, dict):
         validation = dict(DEFAULT_VALIDATION)
+    if not validation.get("ok"):
+        return _error_response(
+            request=request,
+            trace=trace,
+            code="sql_validation_error",
+            message=str(validation.get("reason") or "SQL did not pass readonly validation."),
+            sql=sql,
+            rules=rules if isinstance(rules, list) else [],
+            schema=schema,
+            validation=validation,
+        )
 
     result: dict[str, Any] | None = None
     executed = False
-    if request.execute and validation.get("ok"):
-        query_result = _safe_tool_call(trace, "pg_query", {"sql": sql, "max_rows": max_rows})
+    if request.execute:
+        query_result = _required_tool_call(
+            trace,
+            "pg_query",
+            {"sql": sql, "max_rows": max_rows},
+            error_code="query_error",
+            context={"sql": sql, "rules": rules, "schema": schema, "validation": validation},
+        )
         if isinstance(query_result, dict):
             result = query_result
             executed = True
 
-    answer = None
+    row_count = int(result.get("row_count", 0)) if isinstance(result, dict) else 0
+    if executed and row_count == 0:
+        return _error_response(
+            request=request,
+            trace=trace,
+            code="no_data",
+            message="数据库查询成功执行，但没有返回匹配数据。",
+            sql=sql,
+            executed=True,
+            rules=rules if isinstance(rules, list) else [],
+            schema=schema,
+            validation=validation,
+            result=result,
+        )
+
     try:
         answer = generate_answer(
             question=request.question,
@@ -420,15 +487,31 @@ def _run_orchestrated_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
         if answer:
             _append_trace(trace, "llm_final_answer", "success", "Generated final answer with configured LLM.", {})
     except Exception as exc:
-        _append_trace(trace, "llm_final_answer", "warning", str(exc), {})
-
-    if not answer:
-        answer = _local_answer(
-            question=request.question,
-            language=language,
-            date_context=date_context if isinstance(date_context, dict) else {},
-            result=result,
+        _append_trace(trace, "llm_final_answer", "error", str(exc), {})
+        return _error_response(
+            request=request,
+            trace=trace,
+            code="llm_error",
+            message=f"大模型生成最终回答失败：{exc}",
+            sql=sql,
             executed=executed,
+            rules=rules if isinstance(rules, list) else [],
+            schema=schema,
+            validation=validation,
+            result=result,
+        )
+    if not answer:
+        return _error_response(
+            request=request,
+            trace=trace,
+            code="llm_error",
+            message="大模型没有返回最终回答。",
+            sql=sql,
+            executed=executed,
+            rules=rules if isinstance(rules, list) else [],
+            schema=schema,
+            validation=validation,
+            result=result,
         )
 
     return AgentQueryResponse(
@@ -441,6 +524,8 @@ def _run_orchestrated_agent(request: AgentQueryRequest, trace: list[TraceStep]) 
         db_schema=schema,
         validation=validation,
         result=result,
+        status="success",
+        error=None,
     )
 
 
@@ -459,11 +544,11 @@ def _generate_sql(
             date_context=date_context,
         )
     except LLMNotConfigured as exc:
-        _append_trace(trace, "sql_generation", "warning", str(exc), {"mode": "manual"})
-        generated = None
+        _append_trace(trace, "sql_generation", "error", str(exc), {"mode": "llm"})
+        raise AgentExecutionError("llm_error", str(exc), {"rules": rules, "schema": schema}) from exc
     except Exception as exc:
-        _append_trace(trace, "sql_generation", "warning", str(exc), {"mode": "llm"})
-        generated = None
+        _append_trace(trace, "sql_generation", "error", str(exc), {"mode": "llm"})
+        raise AgentExecutionError("llm_error", f"大模型生成 SQL 失败：{exc}", {"rules": rules, "schema": schema}) from exc
 
     if generated:
         sql = _strip_markdown_sql(generated)
@@ -476,25 +561,8 @@ def _generate_sql(
         )
         return sql
 
-    demo_sql = _demo_sql_from_question(request.question, schema, date_context)
-    if demo_sql:
-        _append_trace(
-            trace,
-            "sql_generation",
-            "success",
-            "Generated SQL with the local demo fallback.",
-            {"mode": "demo_fallback", "sql": demo_sql},
-        )
-        return demo_sql
-
-    _append_trace(
-        trace,
-        "sql_generation",
-        "warning",
-        "No LLM provider is configured; returning an editable starter query.",
-        {"mode": "manual"},
-    )
-    return "SELECT 1 AS agent_ready"
+    _append_trace(trace, "sql_generation", "error", "LLM returned empty SQL.", {"mode": "llm"})
+    raise AgentExecutionError("llm_error", "大模型没有返回 SQL。", {"rules": rules, "schema": schema})
 
 
 def _prepare_query_context(
@@ -503,51 +571,34 @@ def _prepare_query_context(
     *,
     language: str,
 ) -> dict[str, Any]:
-    date_context = _safe_tool_call(trace, "current_date_context", {}) or {}
+    date_context = _required_tool_call(
+        trace,
+        "current_date_context",
+        {},
+        error_code="agent_error",
+    )
     if not isinstance(date_context, dict):
         date_context = {}
 
-    resolve_result = _safe_tool_call(
+    rule_context = _required_tool_call(
         trace,
-        "business_rule_resolve",
-        {"query": request.question, "limit": 3},
+        "business_rule_context",
+        {"question": request.question, "limit": 20},
+        error_code="business_rule_error",
     )
-    if not isinstance(resolve_result, dict):
-        resolve_result = {}
+    rules = rule_context.get("rules") if isinstance(rule_context, dict) else []
+    if not isinstance(rules, list):
+        rules = []
 
-    if resolve_result.get("clarification_required"):
-        answer = _clarification_answer(resolve_result, language=language)
-        _append_trace(
-            trace,
-            "clarification",
-            "warning",
-            "Question is ambiguous; asking the user to choose a business meaning before querying.",
-            {"resolve": _preview(resolve_result)},
-        )
-        return {
-            "date_context": date_context,
-            "rules": _rules_from_resolve(resolve_result),
-            "schema": None,
-            "clarification_response": AgentQueryResponse(
-                question=request.question,
-                answer=answer,
-                sql="",
-                executed=False,
-                trace=trace,
-                rules=_rules_from_resolve(resolve_result),
-                db_schema=None,
-                validation=dict(DEFAULT_VALIDATION),
-                result=None,
-            ),
-        }
-
-    if resolve_result.get("reason") == "no_structured_rules":
-        return _legacy_query_context(request, trace, date_context)
-
-    rules = _rules_from_resolve(resolve_result)
-    schema = _schema_for_selected_tables(trace, resolve_result)
-    if not schema and not rules:
-        return _legacy_query_context(request, trace, date_context)
+    schema = _required_tool_call(
+        trace,
+        "pg_schema_overview",
+        {"limit": 80},
+        error_code="database_error",
+        context={"rules": rules},
+    )
+    if not isinstance(schema, dict):
+        schema = None
 
     return {
         "date_context": date_context,
@@ -795,6 +846,49 @@ def _safe_tool_call(trace: list[TraceStep], name: str, arguments: dict[str, Any]
         return None
 
 
+def _required_tool_call(
+    trace: list[TraceStep],
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    error_code: str,
+    context: dict[str, Any] | None = None,
+) -> Any:
+    try:
+        output = _call_mcp_tool(name, arguments)
+    except Exception as exc:
+        message = str(exc)
+        code = _classify_tool_error(name, message, default_code=error_code)
+        detail = {"arguments": arguments}
+        if context:
+            detail.update(context)
+        _append_trace(trace, f"mcp.{name}", "error", message, detail)
+        raise AgentExecutionError(code, message, detail) from exc
+
+    _append_trace(
+        trace,
+        f"mcp.{name}",
+        "success",
+        _tool_summary(name, output),
+        {"arguments": arguments, "result": _preview(output)},
+    )
+    return output
+
+
+def _classify_tool_error(name: str, message: str, *, default_code: str) -> str:
+    lower_message = message.lower()
+    if "timeout" in lower_message or "statement timeout" in lower_message or "canceling statement" in lower_message:
+        return "query_timeout"
+    if name in {"pg_validate_sql", "pg_query"} and any(
+        term in lower_message
+        for term in ["syntax", "column", "relation", "operator does not exist", "does not exist", "sql"]
+    ):
+        return "sql_error"
+    if name.startswith("pg_"):
+        return "database_error" if default_code == "database_error" else default_code
+    return default_code
+
+
 def _call_mcp_tool(name: str, arguments: dict[str, Any]) -> Any:
     registry = _mcp_tool_registry()
     if name not in registry:
@@ -807,6 +901,7 @@ def _mcp_tool_registry() -> dict[str, Callable[..., Any]]:
 
     return {
         "current_date_context": server.current_date_context,
+        "business_rule_context": server.business_rule_context,
         "business_rule_resolve": server.business_rule_resolve,
         "business_rule_list": server.business_rule_list,
         "business_rule_search": server.business_rule_search,
@@ -869,6 +964,8 @@ def _tool_summary(name: str, output: Any) -> str:
         return f"Resolved today as {output.get('today')} in {output.get('timezone')}."
     if name == "business_rule_list" and isinstance(output, list):
         return f"Listed {len(output)} business rule file(s)."
+    if name == "business_rule_context" and isinstance(output, dict):
+        return f"Loaded {output.get('rule_count', 0)} business rule document(s) for SQL generation."
     if name == "business_rule_resolve" and isinstance(output, dict):
         if output.get("clarification_required"):
             return (
@@ -1011,6 +1108,64 @@ def _resolve_language(request: AgentQueryRequest) -> str:
     if request.language in {"zh", "en"}:
         return request.language
     return "zh" if re.search(r"[\u4e00-\u9fff]", request.question) else "en"
+
+
+def _error_response(
+    *,
+    request: AgentQueryRequest,
+    trace: list[TraceStep],
+    code: str,
+    message: str,
+    sql: str = "",
+    executed: bool = False,
+    rules: list[dict[str, Any]] | None = None,
+    schema: dict[str, Any] | None = None,
+    validation: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+) -> AgentQueryResponse:
+    answer = _error_answer(code=code, message=message, language=_resolve_language(request))
+    return AgentQueryResponse(
+        question=request.question,
+        answer=answer,
+        sql=sql,
+        executed=executed,
+        trace=trace,
+        rules=rules or [],
+        db_schema=schema,
+        validation=validation or dict(DEFAULT_VALIDATION),
+        result=result,
+        status="error",
+        error={"code": code, "message": message},
+    )
+
+
+def _error_answer(*, code: str, message: str, language: str) -> str:
+    if language == "en":
+        if code == "no_data":
+            return "The database query ran successfully, but no matching data was found."
+        if code == "query_timeout":
+            return f"The database query timed out: {message}"
+        if code in {"sql_error", "sql_validation_error"}:
+            return f"The generated SQL failed: {message}"
+        if code == "llm_error":
+            return f"The model call failed: {message}"
+        return f"The query failed: {message}"
+
+    if code == "no_data":
+        return "数据库查询已执行，但没有找到匹配数据。"
+    if code == "query_timeout":
+        return f"数据库查询超时：{message}"
+    if code in {"sql_error", "sql_validation_error"}:
+        return f"SQL 生成或校验失败：{message}"
+    if code == "llm_error":
+        return f"大模型调用失败：{message}"
+    return f"查询失败：{message}"
+
+
+def _rules_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _local_answer(

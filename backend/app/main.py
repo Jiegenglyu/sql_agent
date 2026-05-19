@@ -26,6 +26,7 @@ from backend.app.models import (
 from backend.app.services.agent import run_agent_query
 from backend.app.services.business_rules import BusinessRuleError, search_rules
 from backend.app.services.llm import is_llm_configured
+from backend.app.services.mcp_call_log import read_mcp_calls
 from backend.app.services.postgres import DatabaseError, collect_schema_metadata, execute_select, preview_table, schema_overview
 from backend.app.services.runtime_config import (
     RuntimeConfigError,
@@ -63,6 +64,8 @@ def health() -> HealthResponse:
         app_timezone=settings.app_timezone,
         business_rules_dir=str(settings.business_rules_dir),
         agent_verbose_debug=settings.agent_verbose_debug,
+        mcp_auth_configured=bool(settings.mcp_api_keys),
+        mcp_key_count=len(settings.mcp_api_keys),
         token_usage=get_total_token_usage(),
     )
 
@@ -156,6 +159,46 @@ def api_sql_execute(request: SqlExecuteRequest) -> SqlExecuteResponse:
 @app.post(f"{api_prefix}/agent/query", response_model=AgentQueryResponse)
 def api_agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
     return run_agent_query(request)
+
+
+@app.post(f"{api_prefix}/mcp/ask")
+def api_public_mcp_ask(request: dict[str, Any]) -> dict[str, Any]:
+    from backend.app.mcp import public_server
+
+    return public_server.ask_agent(
+        question=str(request.get("question") or ""),
+        api_key=_dashboard_mcp_api_key(request.get("api_key")),
+        caller=str(request.get("caller") or "dashboard"),
+        language=str(request.get("language") or "auto"),
+        max_rows=request.get("max_rows"),
+        include_capabilities=bool(request.get("include_capabilities", False)),
+    )
+
+
+@app.post(f"{api_prefix}/mcp/capabilities")
+def api_public_mcp_capabilities(request: dict[str, Any]) -> dict[str, Any]:
+    from backend.app.mcp import public_server
+
+    return public_server.describe_capabilities(
+        api_key=_dashboard_mcp_api_key(request.get("api_key")),
+        language=str(request.get("language") or "zh"),
+        refresh=bool(request.get("refresh", False)),
+        caller=str(request.get("caller") or "dashboard"),
+    )
+
+
+@app.get(f"{api_prefix}/mcp/calls")
+def api_public_mcp_calls(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+    calls = read_mcp_calls(limit=limit)
+    return {"calls": calls, "count": len(calls)}
+
+
+def _dashboard_mcp_api_key(value: Any) -> str:
+    explicit = str(value or "").strip()
+    if explicit:
+        return explicit
+    settings = get_settings()
+    return settings.mcp_api_keys[0] if settings.mcp_api_keys else ""
 
 
 @app.post(f"{api_prefix}/agent/query/stream")

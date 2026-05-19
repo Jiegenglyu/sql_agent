@@ -2,6 +2,8 @@ import type {
   AgentResponse,
   ConfigTestResponse,
   HealthResponse,
+  McpCallsResponse,
+  PublicMcpResponse,
   QueryResult,
   RuntimeConfigResponse,
   RuntimeConfigUpdate,
@@ -75,6 +77,48 @@ export function queryAgent(question: string, language: UiLanguage): Promise<Agen
     method: "POST",
     body: JSON.stringify({ question, execute: true, language })
   });
+}
+
+export function askPublicMcp(
+  question: string,
+  apiKey: string,
+  caller: string,
+  language: UiLanguage,
+  maxRows?: number
+): Promise<PublicMcpResponse> {
+  return request<PublicMcpResponse>(apiPath("/mcp/ask"), {
+    method: "POST",
+    body: JSON.stringify({
+      question,
+      api_key: apiKey,
+      caller,
+      language,
+      max_rows: maxRows,
+      include_capabilities: true
+    })
+  });
+}
+
+export function describePublicMcpCapabilities(
+  apiKey: string,
+  caller: string,
+  language: UiLanguage,
+  refresh = false
+): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(apiPath("/mcp/capabilities"), {
+    method: "POST",
+    body: JSON.stringify({
+      api_key: apiKey,
+      caller,
+      language,
+      refresh
+    })
+  });
+}
+
+export function getMcpCalls(limit = 100): Promise<McpCallsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return request<McpCallsResponse>(apiPath(`/mcp/calls?${params.toString()}`));
 }
 
 export interface AgentStreamHandlers {

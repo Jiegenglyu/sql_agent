@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import re
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -86,6 +87,31 @@ def business_rule_search(query: str, limit: int = 8) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+def business_rule_context(question: str, limit: int = 20) -> dict[str, Any]:
+    """Read business rule documents as source-of-truth context for SQL generation."""
+    rules: list[dict[str, Any]] = []
+    for relative_path in list_rule_files()[: max(1, min(limit, 50))]:
+        if relative_path.lower().endswith("readme.md"):
+            continue
+        rule = read_rule(relative_path)
+        content = str(rule.get("content") or "")
+        rules.append(
+            {
+                "path": relative_path,
+                "schema": _metadata_value(content, "schema"),
+                "table": _metadata_value(content, "table"),
+                "content": content,
+                "line_count": rule.get("line_count"),
+            }
+        )
+    return {
+        "question": question,
+        "rule_count": len(rules),
+        "rules": rules,
+    }
+
+
+@mcp.tool()
 def business_rule_resolve(query: str, limit: int = 3) -> dict[str, Any]:
     """Resolve table-scoped business rules and whether the user question needs clarification."""
     return resolve_business_rules(query, limit=limit)
@@ -101,6 +127,12 @@ def business_rule_read(path: str, start_line: int | None = None, end_line: int |
 def business_rule_list() -> list[str]:
     """List business rule files under the configured directory."""
     return list_rule_files()
+
+
+def _metadata_value(content: str, key: str) -> str | None:
+    pattern = re.compile(rf"^(?:[-*]\s*)?{re.escape(key)}\s*[:：]\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+    match = pattern.search(content)
+    return match.group(1).strip().strip("`") if match else None
 
 
 if __name__ == "__main__":
