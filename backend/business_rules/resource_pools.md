@@ -32,6 +32,14 @@ keywords: 容量, 可用卡, 总卡数, available cards, total cards, capacity
 - 按卡型号统计时必须关联卡型号表并按 `card_model` 聚合。
 - 可用率 = `SUM(available_cards) / NULLIF(SUM(total_cards), 0)`。
 
+## 资源池使用情况
+keywords: 使用情况, 使用率, 占用情况, 占用率, utilization, usage
+- 已占用卡数 = `total_cards - available_cards`。
+- 资源池占用率 = `(total_cards - available_cards) / NULLIF(total_cards, 0)`。
+- 资源池可用率 = `available_cards / NULLIF(total_cards, 0)`。
+- 查询整体使用情况时按 `status`、`region`、`environment` 汇总；查询单个资源池使用情况时展示 `pool_name`、`pool_type`、`total_cards`、`available_cards`、已占用卡数、占用率和可用率。
+- 默认只统计 `status = 'active'` 的当前可服务资源池，除非用户明确要求包含维护或离线资源池。
+
 ## 归属和区域
 keywords: 负责人, owner, 团队, 区域, region, environment
 - 归属团队来自 `owner_team`。
